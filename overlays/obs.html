@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Codex Meter - OBS Overlay</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: transparent;
+    font-family: 'Segoe UI', -apple-system, sans-serif;
+    color: #fff;
+    padding: 12px;
+  }
+  .container {
+    background: rgba(15, 15, 20, 0.85);
+    border-radius: 12px;
+    padding: 14px 18px;
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    max-width: 320px;
+  }
+  .header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: rgba(255, 255, 255, 0.5);
+  }
+  .header .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #22c55e;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+  .usage-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .usage-label {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.6);
+    width: 50px;
+    flex-shrink: 0;
+  }
+  .bar-container {
+    flex: 1;
+    height: 8px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.8s ease, background-color 0.5s ease;
+  }
+  .usage-pct {
+    font-size: 12px;
+    font-weight: 600;
+    width: 38px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+  .reset-info {
+    font-size: 10px;
+    color: rgba(255, 255, 255, 0.4);
+    margin-top: 4px;
+  }
+  .disconnected {
+    text-align: center;
+    color: rgba(255, 255, 255, 0.4);
+    font-size: 12px;
+    padding: 8px 0;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div class="dot" id="status-dot"></div>
+    <span>CODEX</span>
+  </div>
+  <div id="usage-content">
+    <div class="disconnected">Connecting...</div>
+  </div>
+  <div class="reset-info" id="reset-info"></div>
+</div>
+<script>
+  const content = document.getElementById('usage-content');
+  const resetInfo = document.getElementById('reset-info');
+  const statusDot = document.getElementById('status-dot');
+
+  function getBarColor(remaining) {
+    if (remaining >= 50) return '#22c55e';
+    if (remaining >= 25) return '#eab308';
+    if (remaining >= 10) return '#f97316';
+    return '#ef4444';
+  }
+
+  function formatCountdown(isoDate) {
+    if (!isoDate) return '';
+    const diff = new Date(isoDate).getTime() - Date.now();
+    if (diff <= 0) return 'Resetting...';
+    const h = Math.floor(diff / 3600000);
+    const m = Math.floor((diff % 3600000) / 60000);
+    if (h > 0) return h + 'h ' + m + 'm';
+    return m + 'm';
+  }
+
+  function renderUsage(data) {
+    statusDot.style.background = '#22c55e';
+    let html = '';
+    let resetText = '';
+
+    const windows = [
+      { key: 'fiveHour', label: '5h' },
+      { key: 'weekly', label: 'Weekly' }
+    ];
+
+    for (const w of windows) {
+      const d = data[w.key];
+      if (!d) continue;
+      const remaining = d.remainingPercent;
+      const color = getBarColor(remaining);
+      html += '<div class="usage-row">' +
+        '<span class="usage-label">' + w.label + '</span>' +
+        '<div class="bar-container"><div class="bar-fill" style="width:' +
+        remaining + '%;background:' + color + '"></div></div>' +
+        '<span class="usage-pct" style="color:' + color + '">' +
+        Math.round(remaining) + '%</span></div>';
+
+      if (d.resetsAt) {
+        const cd = formatCountdown(d.resetsAt);
+        if (cd) resetText += w.label + ' resets in ' + cd + '  ';
+      }
+    }
+
+    content.innerHTML = html || '<div class="disconnected">No data</div>';
+    resetInfo.textContent = resetText.trim();
+  }
+
+  // Connect to SSE
+  const es = new EventSource('http://127.0.0.1:32145/events');
+  es.onmessage = (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      renderUsage(data);
+    } catch(err) {}
+  };
+  es.onerror = () => {
+    statusDot.style.background = '#ef4444';
+    content.innerHTML = '<div class="disconnected">Disconnected</div>';
+  };
+
+  // Also fetch initial data
+  fetch('http://127.0.0.1:32145/api/usage')
+    .then(r => r.json())
+    .then(renderUsage)
+    .catch(() => {});
+
+  // Update countdown every second
+  setInterval(() => {
+    // The SSE push handles this, but a purely local interval could run here too.
+  }, 1000);
+</script>
+</body>
+</html>
