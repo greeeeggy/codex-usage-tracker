@@ -2,7 +2,7 @@ use crate::codex_client::{CodexClient, CodexEvent, UsageSnapshot};
 use crate::process_detector;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::Emitter;
+use tauri::{Emitter, Listener};
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::{Duration, Instant};
@@ -48,6 +48,7 @@ pub struct UsageState {
     pub monitor_state: MonitorState,
     pub error_message: Option<String>,
     pub detected_clients: Vec<process_detector::DetectedClient>,
+    pub token_totals: crate::db::TokenTotals,
 }
 
 impl Default for MonitorState {
@@ -60,13 +61,16 @@ impl Default for MonitorState {
 pub struct UsageService {
     state: Arc<RwLock<UsageState>>,
     app_handle: tauri::AppHandle,
+    db: Arc<crate::db::Db>,
 }
 
 impl UsageService {
     pub fn new(app_handle: tauri::AppHandle) -> Self {
+        let db = Arc::new(crate::db::Db::new(&app_handle).expect("Failed to init DB"));
         Self {
             state: Arc::new(RwLock::new(UsageState::default())),
             app_handle,
+            db,
         }
     }
 
@@ -79,6 +83,7 @@ impl UsageService {
     pub async fn run(self) {
         let state = self.state.clone();
         let app_handle = self.app_handle.clone();
+        let db_clone = self.db.clone();
 
         let mut grace_period_start: Option<Instant> = None;
         let mut client: Option<CodexClient> = None;
@@ -88,6 +93,12 @@ impl UsageService {
 
         // Channel for receiving events from the Codex client
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<CodexEvent>();
+
+        // Internal channel for manual refresh
+        let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<()>();
+        app_handle.listen("refresh-requested", move |_| {
+            let _ = internal_tx.send(());
+        });
 
         loop {
             tokio::select! {
@@ -269,6 +280,55 @@ impl UsageService {
 
                             check_notifications(&snapshot, &mut alert_states, &app_handle);
                         }
+                        CodexEvent::TokenUsageUpdated(token_event) => {
+                            log::info!("Received token usage update: {} tokens", token_event.total_tokens);
+                            if let Err(e) = db_clone.insert_token_event(&token_event) {
+                                log::error!("Failed to persist token event: {}", e);
+                            } else {
+                                let current_state = state.read().await;
+                                if let Some(snapshot) = &current_state.snapshot {
+                                    let mut five_hour_start = 0;
+                                    let mut five_hour_end = i64::MAX;
+                                    let mut weekly_start = 0;
+                                    let mut weekly_end = i64::MAX;
+
+                                    for w in &snapshot.windows {
+                                        if w.name == "fiveHour" {
+                                            if let Some(resets) = &w.resets_at {
+                                                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(resets) {
+                                                    five_hour_end = dt.timestamp();
+                                                    five_hour_start = five_hour_end - 5 * 3600;
+                                                }
+                                            }
+                                        } else if w.name == "weekly" {
+                                            if let Some(resets) = &w.resets_at {
+                                                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(resets) {
+                                                    weekly_end = dt.timestamp();
+                                                    weekly_start = weekly_end - 7 * 24 * 3600;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    match db_clone.get_token_totals(
+                                        &token_event.account_key,
+                                        0,
+                                        five_hour_start,
+                                        five_hour_end,
+                                        weekly_start,
+                                        weekly_end,
+                                    ) {
+                                        Ok(totals) => {
+                                            drop(current_state);
+                                            let mut s = state.write().await;
+                                            s.token_totals = totals.clone();
+                                            let _ = app_handle.emit("token-totals-updated", &totals);
+                                        }
+                                        Err(e) => log::error!("Failed to calculate token totals: {}", e),
+                                    }
+                                }
+                            }
+                        }
                         // CodexEvent::Error(e) => {
                         //     log::error!("Codex client error: {}", e);
                         // }
@@ -281,6 +341,26 @@ impl UsageService {
                                 s.error_message = None;
                                 alert_states.clear();
                                 let _ = app_handle.emit("state-changed", "dormant");
+                            }
+                        }
+                    }
+                }
+
+                // Internal events
+                Some(_) = internal_rx.recv() => {
+                    log::info!("Manual refresh requested");
+                    if state.read().await.monitor_state == MonitorState::Monitoring {
+                        if let Some(c) = &client {
+                            match c.read_rate_limits().await {
+                                Ok(snapshot) => {
+                                    let mut s = state.write().await;
+                                    s.snapshot = Some(snapshot.clone());
+                                    let _ = app_handle.emit("usage-updated", &snapshot);
+                                    check_notifications(&snapshot, &mut alert_states, &app_handle);
+                                }
+                                Err(e) => {
+                                    log::warn!("Failed to refresh rate limits: {}", e);
+                                }
                             }
                         }
                     }

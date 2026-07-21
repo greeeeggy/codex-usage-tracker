@@ -1,10 +1,11 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, Event } from '@tauri-apps/api/event';
-import { MonitorState, MonitorStateResponse, UsageSnapshot, UsageWindow } from '../types/usage';
+import { MonitorState, MonitorStateResponse, UsageSnapshot, UsageWindow, TokenTotals } from '../types/usage';
 
 interface UsageState {
   snapshot: UsageSnapshot | null;
+  tokenTotals: TokenTotals | null;
   monitorState: MonitorState;
   errorMessage: string | null;
   detectedClients: { clientType: string; name: string }[];
@@ -22,6 +23,7 @@ interface UsageState {
 
 export const useUsageStore = create<UsageState>((set, get) => ({
   snapshot: null,
+  tokenTotals: null,
   monitorState: 'dormant',
   errorMessage: null,
   detectedClients: [],
@@ -52,10 +54,20 @@ export const useUsageStore = create<UsageState>((set, get) => ({
         set({ snapshot });
       }
 
+      const tokenTotals = await invoke<TokenTotals | null>('get_token_totals').catch(() => null);
+      if (tokenTotals) {
+        set({ tokenTotals });
+      }
+
       // Listen for updates
       await listen('usage-updated', (event: Event<UsageSnapshot>) => {
         console.log('Usage updated:', event.payload);
         set({ snapshot: event.payload });
+      });
+
+      await listen('token-totals-updated', (event: Event<TokenTotals>) => {
+        console.log('Token totals updated:', event.payload);
+        set({ tokenTotals: event.payload });
       });
 
       await listen('state-changed', (event: Event<MonitorState>) => {

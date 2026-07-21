@@ -14,6 +14,15 @@ pub async fn get_usage(
     Ok(s.snapshot.clone())
 }
 
+/// Tauri command: Get current token totals
+#[tauri::command]
+pub async fn get_token_totals(
+    state: tauri::State<'_, Arc<RwLock<UsageState>>>,
+) -> Result<crate::db::TokenTotals, String> {
+    let s = state.read().await;
+    Ok(s.token_totals.clone())
+}
+
 /// Tauri command: Get current monitor state
 #[tauri::command]
 pub async fn get_monitor_state(

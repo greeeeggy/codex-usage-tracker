@@ -3,6 +3,9 @@ import { useUsageStore } from '../stores/usageStore';
 import { UsageCard } from '../components/UsageCard';
 import { StatusBadge } from '../components/StatusBadge';
 import { ThemeToggle } from '../components/ThemeToggle';
+import { TokenTotalsCard } from '../components/TokenTotalsCard';
+import { TokenBreakdownCard } from '../components/TokenBreakdownCard';
+import { HistoryCharts } from '../components/HistoryCharts';
 import { RefreshCw, Activity } from 'lucide-react';
 import { format } from 'date-fns';
 
@@ -10,6 +13,7 @@ export function Dashboard() {
   const init = useUsageStore((state) => state.init);
   const refresh = useUsageStore((state) => state.refresh);
   const snapshot = useUsageStore((state) => state.snapshot);
+  const tokenTotals = useUsageStore((state) => state.tokenTotals);
   const monitorState = useUsageStore((state) => state.monitorState);
   const errorMessage = useUsageStore((state) => state.errorMessage);
 
@@ -21,7 +25,7 @@ export function Dashboard() {
   const weeklyWindow = snapshot?.windows.find((w) => w.name === 'weekly' || w.durationMinutes === 10080);
 
   return (
-    <div className="min-h-screen bg-neutral-950 text-white p-8 flex flex-col">
+    <div className="h-screen overflow-y-auto bg-neutral-950 text-white p-8 flex flex-col">
       <header className="flex items-center justify-between mb-8">
         <div className="flex items-center gap-4">
           <div className="bg-white/10 p-2 rounded-xl">
@@ -74,16 +78,30 @@ export function Dashboard() {
             </button>
           </div>
         ) : snapshot ? (
-          <div className={`grid gap-6 ${fiveHourWindow && weeklyWindow ? 'grid-cols-2' : 'grid-cols-1'}`}>
-            {fiveHourWindow && <UsageCard title="5-Hour Limit" window={fiveHourWindow} />}
-            {weeklyWindow && <UsageCard title="Weekly Limit" window={weeklyWindow} />}
-            {/* Render any other unexpected windows */}
-            {snapshot.windows
-              .filter((w) => w.name !== 'fiveHour' && w.durationMinutes !== 300 && w.name !== 'weekly' && w.durationMinutes !== 10080)
-              .map((w) => (
-                <UsageCard key={w.name} title={w.name} window={w} />
-              ))
-            }
+          <div className="space-y-6">
+            <div className={`grid gap-6 ${fiveHourWindow && weeklyWindow ? 'grid-cols-2' : 'grid-cols-1'}`}>
+              {fiveHourWindow && <UsageCard title="5-Hour Limit" window={fiveHourWindow} />}
+              {weeklyWindow && <UsageCard title="Weekly Limit" window={weeklyWindow} />}
+              {/* Render any other unexpected windows */}
+              {snapshot.windows
+                .filter((w) => w.name !== 'fiveHour' && w.durationMinutes !== 300 && w.name !== 'weekly' && w.durationMinutes !== 10080)
+                .map((w) => (
+                  <UsageCard key={w.name} title={w.name} window={w} />
+                ))
+              }
+            </div>
+            
+            {tokenTotals && (
+              <div className="grid gap-6 grid-cols-1 md:grid-cols-2">
+                <TokenTotalsCard totals={tokenTotals} />
+                <TokenBreakdownCard breakdown={tokenTotals.currentSession} />
+              </div>
+            )}
+
+            <HistoryCharts 
+              tokenHistory={[]} 
+              quotaHistory={[]} 
+            />
           </div>
         ) : null}
 

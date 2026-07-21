@@ -12,6 +12,7 @@ use tokio::time::{timeout, Duration};
 #[derive(Debug, Clone)]
 pub enum CodexEvent {
     UsageUpdated(UsageSnapshot),
+    TokenUsageUpdated(crate::db::TokenEvent),
     // Error(String),
     Disconnected,
 }
@@ -206,6 +207,33 @@ impl CodexClient {
                                                     .send(CodexEvent::UsageUpdated(normalized));
                                             }
                                         }
+                                    }
+                                } else if method == "thread/tokenUsage/updated" {
+                                    if let Some(params) = msg.params {
+                                        let input_tokens = params.get("inputTokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                                        let cached_input_tokens = params.get("cachedInputTokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                                        let output_tokens = params.get("outputTokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                                        let reasoning_tokens = params.get("reasoningTokens").and_then(|v| v.as_i64());
+                                        let total_tokens = input_tokens + output_tokens;
+                                        
+                                        let event = crate::db::TokenEvent {
+                                            id: uuid::Uuid::new_v4().to_string(),
+                                            account_key: "default".to_string(),
+                                            captured_at: chrono::Utc::now().timestamp(),
+                                            client_type: "unknown".to_string(),
+                                            thread_id: params.get("threadId").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                            turn_id: params.get("turnId").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                            project_path_hash: None,
+                                            model: None,
+                                            input_tokens,
+                                            cached_input_tokens,
+                                            output_tokens,
+                                            reasoning_tokens,
+                                            total_tokens,
+                                            event_type: "turn_final".to_string(),
+                                        };
+                                        
+                                        let _ = event_tx_reader.send(CodexEvent::TokenUsageUpdated(event));
                                     }
                                 }
                             }

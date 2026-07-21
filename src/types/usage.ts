@@ -40,3 +40,21 @@ export interface NotificationPayload {
   title: string;
   body: string;
 }
+
+export interface TokenBreakdown {
+  inputTokens: number;
+  cachedInputTokens: number;
+  uncachedInputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number | null;
+  totalTokens: number;
+}
+
+export interface TokenTotals {
+  currentSession: TokenBreakdown;
+  fiveHourWindow: TokenBreakdown;
+  weeklyWindow: TokenBreakdown;
+  today: TokenBreakdown;
+  currentMonth: TokenBreakdown;
+  allTimeRecorded: TokenBreakdown;
+}

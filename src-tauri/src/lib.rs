@@ -1,5 +1,6 @@
 mod codex_client;
 mod commands;
+mod db;
 mod local_server;
 mod process_detector;
 mod usage_service;
@@ -207,6 +208,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_usage,
+            commands::get_token_totals,
             commands::get_monitor_state,
             commands::refresh_usage,
             commands::toggle_widget,
