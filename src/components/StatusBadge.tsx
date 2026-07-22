@@ -1,5 +1,4 @@
 import { MonitorState } from '../types/usage';
-import { cn } from '../utils/cn';
 
 interface StatusBadgeProps {
   state: MonitorState;
@@ -7,49 +6,67 @@ interface StatusBadgeProps {
 }
 
 export function StatusBadge({ state, errorMessage }: StatusBadgeProps) {
-  let colorClass = 'bg-gray-500';
+  let color = 'var(--text-muted)';
   let label = 'Dormant';
   let pulse = false;
 
   switch (state) {
     case 'monitoring':
-      colorClass = 'bg-green-500';
+      color = 'var(--green)';
       label = 'Monitoring';
       pulse = true;
       break;
     case 'connecting':
-      colorClass = 'bg-yellow-500';
+      color = 'var(--warning)';
       label = 'Connecting...';
       pulse = true;
       break;
     case 'gracePeriod':
-      colorClass = 'bg-yellow-500';
+      color = 'var(--warning)';
       label = 'Grace Period';
       break;
     case 'authRequired':
     case 'error':
-      colorClass = 'bg-red-500';
+      color = 'var(--danger)';
       label = 'Error';
       break;
     case 'dormant':
-      colorClass = 'bg-gray-500';
+      color = 'var(--text-muted)';
       label = 'Dormant';
       break;
   }
 
   return (
     <div className="flex items-center gap-2 group relative">
-      <div className="relative flex h-3 w-3">
+      <div className="relative flex h-2.5 w-2.5 items-center justify-center">
         {pulse && (
-          <span className={cn('animate-ping absolute inline-flex h-full w-full rounded-full opacity-75', colorClass)} />
+          <span
+            className="absolute inline-flex h-full w-full rounded-full opacity-75"
+            style={{
+              background: color,
+              animation: 'pulse-dot 2s ease-in-out infinite',
+            }}
+          />
         )}
-        <span className={cn('relative inline-flex rounded-full h-3 w-3', colorClass)} />
+        <span
+          className="relative inline-flex rounded-full h-2.5 w-2.5"
+          style={{ background: color }}
+        />
       </div>
-      <span className="text-sm font-medium text-white/70">{label}</span>
+      <span className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>
+        {label}
+      </span>
 
       {/* Tooltip */}
       {errorMessage && (
-        <div className="absolute hidden group-hover:block top-full mt-2 right-0 w-64 bg-black/90 text-white text-xs p-3 rounded-lg border border-white/10 shadow-xl z-50 pointer-events-none">
+        <div
+          className="absolute hidden group-hover:block top-full mt-2 right-0 w-64 text-xs p-3 rounded-lg border shadow-xl z-50 pointer-events-none"
+          style={{
+            background: 'var(--bg-elevated)',
+            borderColor: 'var(--border-default)',
+            color: 'var(--text-primary)',
+          }}
+        >
           {errorMessage}
         </div>
       )}

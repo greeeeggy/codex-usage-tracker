@@ -190,7 +190,7 @@ function normalizeSnapshot(snapshot) {
       usedPercent: clamp(window.usedPercent, 0, 100),
       remainingPercent: clamp(100 - window.usedPercent, 0, 100),
       resetsAt:
-        window.resetsAt !== null
+        window.usedPercent > 0 && window.resetsAt !== null
           ? new Date(window.resetsAt * 1000).toISOString()
           : null,
     }));

@@ -158,7 +158,7 @@ impl UsageService {
                                             );
 
                                             let mut s = state.write().await;
-                                            s.snapshot = Some(snapshot.clone());
+                                            let snapshot = update_snapshot_state(&mut s, snapshot);
                                             s.monitor_state = MonitorState::Monitoring;
                                             let _ = app_handle.emit("usage-updated", &snapshot);
                                             let _ = app_handle.emit("state-changed", "monitoring");
@@ -255,7 +255,7 @@ impl UsageService {
                             match c.read_rate_limits().await {
                                 Ok(snapshot) => {
                                     let mut s = state.write().await;
-                                    s.snapshot = Some(snapshot.clone());
+                                    let snapshot = update_snapshot_state(&mut s, snapshot);
                                     let _ = app_handle.emit("usage-updated", &snapshot);
 
                                     // Check notification thresholds
@@ -275,7 +275,7 @@ impl UsageService {
                         CodexEvent::UsageUpdated(snapshot) => {
                             log::info!("Received push usage update");
                             let mut s = state.write().await;
-                            s.snapshot = Some(snapshot.clone());
+                            let snapshot = update_snapshot_state(&mut s, snapshot);
                             let _ = app_handle.emit("usage-updated", &snapshot);
 
                             check_notifications(&snapshot, &mut alert_states, &app_handle);
@@ -354,7 +354,7 @@ impl UsageService {
                             match c.read_rate_limits().await {
                                 Ok(snapshot) => {
                                     let mut s = state.write().await;
-                                    s.snapshot = Some(snapshot.clone());
+                                    let snapshot = update_snapshot_state(&mut s, snapshot);
                                     let _ = app_handle.emit("usage-updated", &snapshot);
                                     check_notifications(&snapshot, &mut alert_states, &app_handle);
                                 }
@@ -368,6 +368,24 @@ impl UsageService {
             }
         }
     }
+}
+
+/// Updates state with a new snapshot while stabilizing `resets_at` when used_percent == 0
+/// so that rolling placeholder timestamps from periodic polls don't reset the timer display.
+fn update_snapshot_state(s: &mut UsageState, mut new_snapshot: UsageSnapshot) -> UsageSnapshot {
+    if let Some(existing) = &s.snapshot {
+        for new_win in &mut new_snapshot.windows {
+            if new_win.used_percent == 0.0 {
+                if let Some(old_win) = existing.windows.iter().find(|w| w.name == new_win.name) {
+                    if old_win.used_percent == 0.0 && old_win.resets_at.is_some() {
+                        new_win.resets_at = old_win.resets_at.clone();
+                    }
+                }
+            }
+        }
+    }
+    s.snapshot = Some(new_snapshot.clone());
+    new_snapshot
 }
 
 /// Check and fire desktop notifications at threshold percentages.

@@ -14,16 +14,20 @@
       {
         "label": "main",
         "title": "Codex Meter",
-        "width": 720,
-        "height": 480,
+        "width": 1200,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 600,
         "center": true,
-        "visible": false
+        "visible": false,
+        "decorations": false,
+        "transparent": false
       },
       {
         "label": "overlay",
         "title": "Codex Usage",
-        "width": 320,
-        "height": 110,
+        "width": 360,
+        "height": 185,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,

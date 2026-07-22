@@ -3,6 +3,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, Event } from '@tauri-apps/api/event';
 import { MonitorState, MonitorStateResponse, UsageSnapshot, UsageWindow, TokenTotals } from '../types/usage';
 
+export type AppPage = 'overview' | 'usage' | 'history' | 'limits' | 'sessions' | 'insights' | 'settings';
+
 interface UsageState {
   snapshot: UsageSnapshot | null;
   tokenTotals: TokenTotals | null;
@@ -10,6 +12,9 @@ interface UsageState {
   errorMessage: string | null;
   detectedClients: { clientType: string; name: string }[];
   isDarkTheme: boolean;
+  isRefreshing: boolean;
+  lastRefreshError: string | null;
+  activePage: AppPage;
 
   // Derived getters
   getFiveHourWindow: () => UsageWindow | undefined;
@@ -19,6 +24,7 @@ interface UsageState {
   init: () => Promise<void>;
   refresh: () => Promise<void>;
   toggleTheme: () => void;
+  setActivePage: (page: AppPage) => void;
 }
 
 export const useUsageStore = create<UsageState>((set, get) => ({
@@ -27,7 +33,10 @@ export const useUsageStore = create<UsageState>((set, get) => ({
   monitorState: 'dormant',
   errorMessage: null,
   detectedClients: [],
-  isDarkTheme: window.matchMedia('(prefers-color-scheme: dark)').matches,
+  isDarkTheme: true,
+  isRefreshing: false,
+  lastRefreshError: null,
+  activePage: 'overview',
 
   getFiveHourWindow: () => {
     const { snapshot } = get();
@@ -88,10 +97,20 @@ export const useUsageStore = create<UsageState>((set, get) => ({
   },
 
   refresh: async () => {
+    const { isRefreshing } = get();
+    if (isRefreshing) return; // Prevent duplicate refreshes
+
+    set({ isRefreshing: true, lastRefreshError: null });
     try {
       await invoke('refresh_usage');
+      // Give a brief delay so the UI shows the spinner
+      await new Promise((r) => setTimeout(r, 500));
     } catch (err) {
-      console.error('Failed to refresh:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Failed to refresh:', msg);
+      set({ lastRefreshError: msg });
+    } finally {
+      set({ isRefreshing: false });
     }
   },
 
@@ -105,5 +124,9 @@ export const useUsageStore = create<UsageState>((set, get) => ({
       }
       return { isDarkTheme: newDark };
     });
+  },
+
+  setActivePage: (page: AppPage) => {
+    set({ activePage: page });
   },
 }));

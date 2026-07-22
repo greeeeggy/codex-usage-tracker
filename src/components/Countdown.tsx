@@ -1,17 +1,51 @@
 import { useState, useEffect } from 'react';
-import { cn } from '../utils/cn';
 
 interface CountdownProps {
-  resetsAt: string | null;
+  resetsAt: string | null | undefined;
+  /** Current used percentage — when 0, the countdown hasn't truly started yet */
+  usedPercent?: number;
+  /** Duration of this window in minutes (10080 = 7 days, 300 = 5 hours) */
+  durationMinutes?: number | null;
   className?: string;
+  fallback?: string;
 }
 
-export function Countdown({ resetsAt, className }: CountdownProps) {
+/**
+ * Format a full-duration string from a window's durationMinutes.
+ * e.g., 10080 → "7d 0h 0m", 300 → "5h 0m"
+ */
+function formatFullDuration(durationMinutes: number | null | undefined): string {
+  if (!durationMinutes) return '7d 0h 0m'; // default to weekly
+  const totalMs = durationMinutes * 60_000;
+  const d = Math.floor(totalMs / 86400000);
+  const h = Math.floor((totalMs % 86400000) / 3600000);
+  const m = Math.floor((totalMs % 3600000) / 60000);
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m 0s`;
+}
+
+export function Countdown({
+  resetsAt,
+  usedPercent,
+  durationMinutes,
+  className = '',
+  fallback = '—',
+}: CountdownProps) {
   const [timeLeft, setTimeLeft] = useState<string>('');
 
+  // If usage hasn't started (0%), show the full static duration instead of a live countdown.
+  const usageStarted = usedPercent !== undefined && usedPercent !== null && usedPercent > 0;
+
   useEffect(() => {
+    // No usage yet → show full static duration (e.g. "7d 0h 0m")
+    if (!usageStarted) {
+      setTimeLeft(formatFullDuration(durationMinutes));
+      return;
+    }
+
     if (!resetsAt) {
-      setTimeLeft('');
+      setTimeLeft(fallback);
       return;
     }
 
@@ -43,13 +77,11 @@ export function Countdown({ resetsAt, className }: CountdownProps) {
     updateTimer();
     const interval = setInterval(updateTimer, 1000);
     return () => clearInterval(interval);
-  }, [resetsAt]);
-
-  if (!resetsAt) return null;
+  }, [resetsAt, fallback, usageStarted, durationMinutes]);
 
   return (
-    <span className={cn('tabular-nums font-mono', className)}>
-      {timeLeft}
+    <span className={`tabular-nums ${className}`} style={{ fontFamily: 'var(--font-sans)' }}>
+      {timeLeft || fallback}
     </span>
   );
 }

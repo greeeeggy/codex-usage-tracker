@@ -1,95 +1,126 @@
 import {
-  LineChart,
-  Line,
+  AreaChart,
+  Area,
   XAxis,
   YAxis,
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  Area,
-  AreaChart
 } from 'recharts';
+import { ChevronRight } from 'lucide-react';
 
 interface ChartDataPoint {
   timestamp: string;
   value: number;
 }
 
-interface HistoryChartsProps {
-  tokenHistory: ChartDataPoint[];
-  quotaHistory: ChartDataPoint[];
+interface WeeklyUsageChartProps {
+  data: ChartDataPoint[];
 }
 
-export function HistoryCharts({ tokenHistory, quotaHistory }: HistoryChartsProps) {
+export function WeeklyUsageChart({ data }: WeeklyUsageChartProps) {
+  const hasData = data.length > 0;
+
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mt-6">
-      <div className="bg-white/5 border border-white/10 rounded-2xl p-6 backdrop-blur-md">
-        <h3 className="text-sm font-semibold text-white/60 uppercase tracking-wider mb-6">Tokens Used (Daily)</h3>
-        <div className="h-64">
+    <div
+      className="rounded-xl p-5 flex flex-col"
+      style={{
+        background: 'var(--bg-card)',
+        border: '1px solid var(--border-default)',
+        minHeight: 260,
+      }}
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-3">
+          <span className="text-[15px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+            Usage This Week
+          </span>
+          {hasData && (
+            <div className="flex items-center gap-1.5">
+              <div className="w-2 h-2 rounded-full" style={{ background: 'var(--purple)' }} />
+              <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>Hours</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Chart or empty state */}
+      {hasData ? (
+        <div className="flex-1" style={{ minHeight: 180 }}>
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={tokenHistory}>
+            <AreaChart data={data} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
               <defs>
-                <linearGradient id="colorTokens" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
+                <linearGradient id="usageGradient" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="var(--purple)" stopOpacity={0.25} />
+                  <stop offset="95%" stopColor="var(--purple)" stopOpacity={0} />
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" vertical={false} />
-              <XAxis 
-                dataKey="timestamp" 
-                stroke="rgba(255,255,255,0.5)"
-                tick={{ fill: 'rgba(255,255,255,0.5)', fontSize: 12 }}
+              <CartesianGrid
+                strokeDasharray="3 3"
+                stroke="rgba(255,255,255,0.04)"
+                vertical={false}
+              />
+              <XAxis
+                dataKey="timestamp"
+                stroke="transparent"
+                tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
                 tickLine={false}
                 axisLine={false}
               />
-              <YAxis 
-                stroke="rgba(255,255,255,0.5)"
-                tick={{ fill: 'rgba(255,255,255,0.5)', fontSize: 12 }}
+              <YAxis
+                stroke="transparent"
+                tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
                 tickLine={false}
                 axisLine={false}
-                tickFormatter={(value) => value >= 1000 ? `${(value / 1000).toFixed(0)}k` : value}
+                width={40}
               />
-              <Tooltip 
-                contentStyle={{ backgroundColor: '#171717', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px' }}
-                itemStyle={{ color: '#fff' }}
+              <Tooltip
+                contentStyle={{
+                  backgroundColor: 'var(--bg-elevated)',
+                  border: '1px solid var(--border-default)',
+                  borderRadius: '8px',
+                  fontSize: '12px',
+                }}
+                itemStyle={{ color: 'var(--text-primary)' }}
+                labelStyle={{ color: 'var(--text-muted)' }}
               />
-              <Area type="monotone" dataKey="value" stroke="#3b82f6" fillOpacity={1} fill="url(#colorTokens)" />
+              <Area
+                type="monotone"
+                dataKey="value"
+                stroke="var(--purple)"
+                strokeWidth={2}
+                fillOpacity={1}
+                fill="url(#usageGradient)"
+                dot={{ r: 3, fill: 'var(--purple)', strokeWidth: 0 }}
+                activeDot={{ r: 5, fill: 'var(--purple-bright)', strokeWidth: 2, stroke: 'var(--bg-card)' }}
+              />
             </AreaChart>
           </ResponsiveContainer>
         </div>
-      </div>
-
-      <div className="bg-white/5 border border-white/10 rounded-2xl p-6 backdrop-blur-md">
-        <h3 className="text-sm font-semibold text-white/60 uppercase tracking-wider mb-6">Quota Remaining</h3>
-        <div className="h-64">
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={quotaHistory}>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" vertical={false} />
-              <XAxis 
-                dataKey="timestamp" 
-                stroke="rgba(255,255,255,0.5)"
-                tick={{ fill: 'rgba(255,255,255,0.5)', fontSize: 12 }}
-                tickLine={false}
-                axisLine={false}
-              />
-              <YAxis 
-                stroke="rgba(255,255,255,0.5)"
-                tick={{ fill: 'rgba(255,255,255,0.5)', fontSize: 12 }}
-                tickLine={false}
-                axisLine={false}
-                domain={[0, 100]}
-                tickFormatter={(value) => `${value}%`}
-              />
-              <Tooltip 
-                contentStyle={{ backgroundColor: '#171717', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px' }}
-                itemStyle={{ color: '#fff' }}
-                formatter={(value: number) => [`${value.toFixed(1)}%`, 'Remaining']}
-              />
-              <Line type="stepAfter" dataKey="value" stroke="#10b981" strokeWidth={2} dot={false} />
-            </LineChart>
-          </ResponsiveContainer>
+      ) : (
+        <div
+          className="flex-1 flex flex-col items-center justify-center rounded-lg"
+          style={{ background: 'rgba(255,255,255,0.02)' }}
+        >
+          <span className="text-sm mb-1" style={{ color: 'var(--text-muted)' }}>
+            No usage data this week
+          </span>
+          <span className="text-[11px]" style={{ color: 'var(--text-faint)' }}>
+            Usage history will appear after your first monitored session
+          </span>
         </div>
-      </div>
+      )}
+
+      {/* Footer link */}
+      <button
+        className="flex items-center gap-1 text-[12px] font-medium mt-3 self-start transition-colors duration-150"
+        style={{ color: 'var(--text-muted)' }}
+        onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--text-primary)'; }}
+        onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted)'; }}
+      >
+        View full history <ChevronRight size={12} />
+      </button>
     </div>
   );
 }

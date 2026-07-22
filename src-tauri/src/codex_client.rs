@@ -61,13 +61,16 @@ struct JsonRpcMessage {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawWindow {
-    #[serde(alias = "windowDurationMins")]
+    #[serde(alias = "windowDurationMins", alias = "window_duration_mins")]
     window_duration_mins: Option<u64>,
-    #[serde(alias = "usedPercent")]
+    #[serde(alias = "usedPercent", alias = "used_percent")]
     used_percent: Option<f64>,
-    #[serde(alias = "resetsAt")]
+    #[serde(alias = "remainingPercent", alias = "remaining_percent")]
+    remaining_percent: Option<f64>,
+    #[serde(alias = "resetsAt", alias = "resets_at")]
     resets_at: Option<f64>,
 }
+
 
 /// Raw rate-limit snapshot from Codex
 #[derive(Debug, Deserialize)]
@@ -447,8 +450,16 @@ fn normalize_snapshot(raw: &RawSnapshot) -> UsageSnapshot {
 
 /// Normalize a single window
 fn normalize_window(source: &str, raw: &RawWindow) -> UsageWindow {
-    let used = raw.used_percent.unwrap_or(0.0).clamp(0.0, 100.0);
-    let remaining = (100.0 - used).clamp(0.0, 100.0);
+    let (used, remaining) = if let Some(r) = raw.remaining_percent {
+        let rem_clamped = r.clamp(0.0, 100.0);
+        (100.0 - rem_clamped, rem_clamped)
+    } else if let Some(u) = raw.used_percent {
+        let u_clamped = u.clamp(0.0, 100.0);
+        let rem_clamped = (100.0 - u_clamped).clamp(0.0, 100.0);
+        (u_clamped, rem_clamped)
+    } else {
+        (0.0, 100.0)
+    };
 
     let resets_at = raw.resets_at.map(|ts| {
         chrono::DateTime::from_timestamp(ts as i64, 0)

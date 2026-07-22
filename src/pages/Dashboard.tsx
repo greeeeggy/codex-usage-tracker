@@ -1,116 +1,311 @@
 import { useEffect } from 'react';
 import { useUsageStore } from '../stores/usageStore';
-import { UsageCard } from '../components/UsageCard';
-import { StatusBadge } from '../components/StatusBadge';
-import { ThemeToggle } from '../components/ThemeToggle';
-import { TokenTotalsCard } from '../components/TokenTotalsCard';
-import { TokenBreakdownCard } from '../components/TokenBreakdownCard';
-import { HistoryCharts } from '../components/HistoryCharts';
-import { RefreshCw, Activity } from 'lucide-react';
-import { format } from 'date-fns';
+import { DashboardHeader } from '../components/DashboardHeader';
+import { WeeklyLimitCard } from '../components/WeeklyLimitCard';
+import { WeeklyUsageChart } from '../components/HistoryCharts';
+import { MetricCardGrid } from '../components/MetricCardGrid';
+import { RecentEventsCard } from '../components/RecentEventsCard';
+import { LimitSummaryCard } from '../components/LimitSummaryCard';
+import { Activity, RefreshCw, Layers, History as HistoryIcon, Gauge, MonitorDot, Lightbulb, Settings as SettingsIcon, Cpu } from 'lucide-react';
+import { formatNumber, formatTokensAsDuration } from '../utils/cn';
 
 export function Dashboard() {
-  const init = useUsageStore((state) => state.init);
-  const refresh = useUsageStore((state) => state.refresh);
-  const snapshot = useUsageStore((state) => state.snapshot);
-  const tokenTotals = useUsageStore((state) => state.tokenTotals);
-  const monitorState = useUsageStore((state) => state.monitorState);
-  const errorMessage = useUsageStore((state) => state.errorMessage);
+  const init = useUsageStore((s) => s.init);
+  const refresh = useUsageStore((s) => s.refresh);
+  const snapshot = useUsageStore((s) => s.snapshot);
+  const tokenTotals = useUsageStore((s) => s.tokenTotals);
+  const monitorState = useUsageStore((s) => s.monitorState);
+  const errorMessage = useUsageStore((s) => s.errorMessage);
+  const detectedClients = useUsageStore((s) => s.detectedClients);
+  const activePage = useUsageStore((s) => s.activePage);
 
   useEffect(() => {
     init();
   }, [init]);
 
-  const fiveHourWindow = snapshot?.windows.find((w) => w.name === 'fiveHour' || w.durationMinutes === 300);
-  const weeklyWindow = snapshot?.windows.find((w) => w.name === 'weekly' || w.durationMinutes === 10080);
+  const weeklyWindow = snapshot?.windows.find(
+    (w) => w.name === 'weekly' || w.durationMinutes === 10080
+  );
+  const fiveHourWindow = snapshot?.windows.find(
+    (w) => w.name === 'fiveHour' || w.durationMinutes === 300
+  );
 
-  return (
-    <div className="h-screen overflow-y-auto bg-neutral-950 text-white p-8 flex flex-col">
-      <header className="flex items-center justify-between mb-8">
-        <div className="flex items-center gap-4">
-          <div className="bg-white/10 p-2 rounded-xl">
-            <Activity className="w-6 h-6 text-green-400" />
+  // Error / auth required state
+  if (monitorState === 'error' || monitorState === 'authRequired') {
+    return (
+      <div className="h-full p-6">
+        <DashboardHeader />
+        <div
+          className="rounded-2xl p-10 text-center flex flex-col items-center justify-center"
+          style={{
+            background: 'var(--danger-dim)',
+            border: '1px solid rgba(255, 77, 94, 0.2)',
+            minHeight: 300,
+          }}
+        >
+          <div
+            className="w-14 h-14 rounded-full flex items-center justify-center mb-4"
+            style={{ background: 'rgba(255, 77, 94, 0.15)' }}
+          >
+            <Activity size={24} style={{ color: 'var(--danger)' }} />
           </div>
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">Codex Meter</h1>
-            <div className="flex items-center gap-2 mt-1">
-              <span className="text-xs px-2 py-0.5 bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded-md uppercase font-medium tracking-wider">
-                {snapshot?.planType || 'UNKNOWN PLAN'}
-              </span>
-              <StatusBadge state={monitorState} errorMessage={errorMessage} />
-            </div>
-          </div>
-        </div>
-        <div className="flex items-center gap-4">
-          {snapshot && (
-            <div className="text-right mr-4">
-              <span className="text-xs text-white/50 block">Last Refreshed</span>
-              <span className="text-sm font-medium text-white/80">
-                {format(new Date(snapshot.capturedAt), 'HH:mm:ss')}
-              </span>
-            </div>
-          )}
+          <h2 className="text-lg font-semibold mb-2" style={{ color: 'var(--text-primary)' }}>
+            Connection Issue
+          </h2>
+          <p className="text-sm mb-6 max-w-md" style={{ color: 'var(--text-secondary)' }}>
+            {errorMessage || 'Unable to connect to Codex. Please check your configuration.'}
+          </p>
           <button
             onClick={refresh}
-            className="p-2 rounded-full hover:bg-white/10 text-white/70 hover:text-white transition-colors"
-            title="Refresh Data"
-            disabled={monitorState === 'error' || monitorState === 'authRequired'}
+            className="flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-medium transition-colors duration-150 cursor-pointer"
+            style={{
+              background: 'rgba(255,255,255,0.08)',
+              color: 'var(--text-primary)',
+              border: '1px solid var(--border-default)',
+            }}
           >
-            <RefreshCw className="w-5 h-5" />
+            <RefreshCw size={14} />
+            Retry Connection
           </button>
-          <ThemeToggle />
         </div>
-      </header>
+      </div>
+    );
+  }
 
-      <main className="flex-1">
-        {monitorState === 'error' || monitorState === 'authRequired' ? (
-          <div className="bg-red-500/10 border border-red-500/20 rounded-2xl p-8 text-center flex flex-col items-center justify-center h-full">
-            <div className="bg-red-500/20 p-4 rounded-full mb-4">
-              <Activity className="w-8 h-8 text-red-400" />
-            </div>
-            <h2 className="text-xl font-semibold mb-2">Connection Issue</h2>
-            <p className="text-red-200/70 mb-6 max-w-md">{errorMessage}</p>
-            <button
-              onClick={refresh}
-              className="px-6 py-2 bg-white/10 hover:bg-white/20 rounded-lg font-medium transition-colors"
-            >
-              Retry Connection
-            </button>
-          </div>
-        ) : snapshot ? (
+  // View rendering based on active sidebar tab
+  const renderActiveView = () => {
+    switch (activePage) {
+      case 'usage':
+        return (
           <div className="space-y-6">
-            <div className={`grid gap-6 ${fiveHourWindow && weeklyWindow ? 'grid-cols-2' : 'grid-cols-1'}`}>
-              {fiveHourWindow && <UsageCard title="5-Hour Limit" window={fiveHourWindow} />}
-              {weeklyWindow && <UsageCard title="Weekly Limit" window={weeklyWindow} />}
-              {/* Render any other unexpected windows */}
-              {snapshot.windows
-                .filter((w) => w.name !== 'fiveHour' && w.durationMinutes !== 300 && w.name !== 'weekly' && w.durationMinutes !== 10080)
-                .map((w) => (
-                  <UsageCard key={w.name} title={w.name} window={w} />
-                ))
-              }
-            </div>
-            
-            {tokenTotals && (
-              <div className="grid gap-6 grid-cols-1 md:grid-cols-2">
-                <TokenTotalsCard totals={tokenTotals} />
-                <TokenBreakdownCard breakdown={tokenTotals.currentSession} />
+            <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
+              <Layers size={20} style={{ color: 'var(--purple)' }} /> Detailed Usage & Token Breakdown
+            </h2>
+
+            {tokenTotals ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {/* Token Totals */}
+                <div className="rounded-2xl p-6" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-default)' }}>
+                  <h3 className="text-sm font-semibold uppercase tracking-wider mb-4" style={{ color: 'var(--text-muted)' }}>
+                    Token Usage Totals
+                  </h3>
+                  <div className="space-y-3">
+                    {[
+                      { label: 'Current Session', value: tokenTotals.currentSession.totalTokens },
+                      { label: 'Current 5h Window', value: tokenTotals.fiveHourWindow.totalTokens },
+                      { label: 'Current Week', value: tokenTotals.weeklyWindow.totalTokens },
+                      { label: 'Today', value: tokenTotals.today.totalTokens },
+                      { label: 'This Month', value: tokenTotals.currentMonth.totalTokens },
+                      { label: 'All-Time Recorded', value: tokenTotals.allTimeRecorded.totalTokens },
+                    ].map((item, idx) => (
+                      <div key={idx} className="flex justify-between items-center py-2 border-b border-white/5 last:border-0">
+                        <span style={{ color: 'var(--text-secondary)' }}>{item.label}</span>
+                        <span className="font-mono font-semibold tabular-nums" style={{ color: 'var(--text-primary)' }}>
+                          {formatNumber(item.value)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Current Session Token Breakdown */}
+                <div className="rounded-2xl p-6" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-default)' }}>
+                  <h3 className="text-sm font-semibold uppercase tracking-wider mb-4" style={{ color: 'var(--text-muted)' }}>
+                    Current Session Token Breakdown
+                  </h3>
+                  <div className="space-y-3">
+                    {[
+                      { label: 'Input Tokens', value: tokenTotals.currentSession.inputTokens },
+                      { label: 'Cached Input Tokens', value: tokenTotals.currentSession.cachedInputTokens },
+                      { label: 'Uncached Input Tokens', value: tokenTotals.currentSession.uncachedInputTokens },
+                      { label: 'Output Tokens', value: tokenTotals.currentSession.outputTokens },
+                    ].map((item, idx) => (
+                      <div key={idx} className="flex justify-between items-center py-2 border-b border-white/5 last:border-0">
+                        <span style={{ color: 'var(--text-secondary)' }}>{item.label}</span>
+                        <span className="font-mono font-semibold tabular-nums" style={{ color: 'var(--text-primary)' }}>
+                          {formatNumber(item.value)}
+                        </span>
+                      </div>
+                    ))}
+                    {tokenTotals.currentSession.reasoningTokens ? (
+                      <div className="flex justify-between items-center py-2 border-b border-white/5 last:border-0">
+                        <span style={{ color: 'var(--text-secondary)' }}>Reasoning Tokens</span>
+                        <span className="font-mono font-semibold tabular-nums" style={{ color: 'var(--purple-bright)' }}>
+                          {formatNumber(tokenTotals.currentSession.reasoningTokens)}
+                        </span>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-2xl p-8 text-center" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-default)' }}>
+                <span style={{ color: 'var(--text-muted)' }}>No token usage recorded yet. Start using Codex to see token stats.</span>
               </div>
             )}
-
-            <HistoryCharts 
-              tokenHistory={[]} 
-              quotaHistory={[]} 
-            />
           </div>
-        ) : null}
+        );
 
-        {monitorState === 'dormant' && !snapshot && (
-          <div className="mt-8 text-center text-white/40">
-            Waiting for Codex activity...
+      case 'history':
+        return (
+          <div className="space-y-6">
+            <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
+              <HistoryIcon size={20} style={{ color: 'var(--purple)' }} /> Usage & Quota History
+            </h2>
+            <WeeklyUsageChart data={[]} />
           </div>
-        )}
-      </main>
+        );
+
+      case 'limits':
+        return (
+          <div className="space-y-6">
+            <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
+              <Gauge size={20} style={{ color: 'var(--purple)' }} /> Monitored Rate Limits
+            </h2>
+
+            <div className="grid grid-cols-1 gap-6">
+              {fiveHourWindow && <WeeklyLimitCard window={fiveHourWindow} />}
+              {weeklyWindow && <WeeklyLimitCard window={weeklyWindow} />}
+              {!fiveHourWindow && !weeklyWindow && (
+                <div className="rounded-2xl p-8 text-center" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-default)' }}>
+                  <span style={{ color: 'var(--text-muted)' }}>No rate limits currently active.</span>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+
+      case 'sessions':
+        return (
+          <div className="space-y-6">
+            <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
+              <MonitorDot size={20} style={{ color: 'var(--purple)' }} /> Active Sessions
+            </h2>
+
+            <div className="rounded-2xl p-6" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-default)' }}>
+              <h3 className="text-sm font-semibold mb-4" style={{ color: 'var(--text-primary)' }}>
+                Detected Codex Clients ({detectedClients.length})
+              </h3>
+              {detectedClients.length > 0 ? (
+                <div className="space-y-3">
+                  {detectedClients.map((client, idx) => (
+                    <div key={idx} className="flex items-center justify-between p-3 rounded-lg" style={{ background: 'var(--bg-elevated)' }}>
+                      <div className="flex items-center gap-3">
+                        <Cpu size={18} style={{ color: 'var(--green)' }} />
+                        <div>
+                          <span className="font-medium text-sm block" style={{ color: 'var(--text-primary)' }}>{client.name}</span>
+                          <span className="text-xs" style={{ color: 'var(--text-muted)' }}>{client.clientType}</span>
+                        </div>
+                      </div>
+                      <span className="text-xs px-2 py-1 rounded bg-green-500/10 text-green-400 font-mono">ACTIVE</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="py-6 text-center" style={{ color: 'var(--text-muted)' }}>
+                  No active Codex client processes detected.
+                </div>
+              )}
+            </div>
+          </div>
+        );
+
+      case 'insights':
+        return (
+          <div className="space-y-6">
+            <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
+              <Lightbulb size={20} style={{ color: 'var(--purple)' }} /> Usage Insights
+            </h2>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="rounded-2xl p-5" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-default)' }}>
+                <span className="text-xs font-medium block mb-1" style={{ color: 'var(--text-muted)' }}>Today's Total</span>
+                <span className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>
+                  {tokenTotals?.today.totalTokens ? formatTokensAsDuration(tokenTotals.today.totalTokens) : '0m'}
+                </span>
+              </div>
+              <div className="rounded-2xl p-5" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-default)' }}>
+                <span className="text-xs font-medium block mb-1" style={{ color: 'var(--text-muted)' }}>This Month Total</span>
+                <span className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>
+                  {tokenTotals?.currentMonth.totalTokens ? formatTokensAsDuration(tokenTotals.currentMonth.totalTokens) : '0m'}
+                </span>
+              </div>
+              <div className="rounded-2xl p-5" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-default)' }}>
+                <span className="text-xs font-medium block mb-1" style={{ color: 'var(--text-muted)' }}>All-Time Total</span>
+                <span className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>
+                  {tokenTotals?.allTimeRecorded.totalTokens ? formatTokensAsDuration(tokenTotals.allTimeRecorded.totalTokens) : '0m'}
+                </span>
+              </div>
+            </div>
+          </div>
+        );
+
+      case 'settings':
+        return (
+          <div className="space-y-6">
+            <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
+              <SettingsIcon size={20} style={{ color: 'var(--purple)' }} /> Application Settings
+            </h2>
+
+            <div className="rounded-2xl p-6 space-y-4" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-default)' }}>
+              <div className="flex items-center justify-between py-3 border-b border-white/5">
+                <div>
+                  <span className="font-semibold text-sm block" style={{ color: 'var(--text-primary)' }}>Monitoring Status</span>
+                  <span className="text-xs" style={{ color: 'var(--text-muted)' }}>Current state of the Codex CLI rate limit monitor</span>
+                </div>
+                <span className="text-xs px-2.5 py-1 rounded-full font-mono uppercase font-bold" style={{ background: 'var(--purple-dim)', color: 'var(--purple-bright)' }}>
+                  {monitorState}
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between py-3">
+                <div>
+                  <span className="font-semibold text-sm block" style={{ color: 'var(--text-primary)' }}>Refresh Monitoring Data</span>
+                  <span className="text-xs" style={{ color: 'var(--text-muted)' }}>Force re-fetch rate limits from Codex</span>
+                </div>
+                <button
+                  onClick={refresh}
+                  className="px-4 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+                  style={{ background: 'var(--purple-dim)', color: 'var(--purple-bright)', border: '1px solid rgba(139, 92, 246, 0.3)' }}
+                >
+                  Refresh Now
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+
+      case 'overview':
+      default:
+        return (
+          <div className="space-y-4">
+            {/* Primary card: Weekly Limit */}
+            <WeeklyLimitCard window={weeklyWindow} />
+
+            {/* Row: Chart + Metric cards */}
+            <div className="grid grid-cols-1 xl:grid-cols-5 gap-4">
+              <div className="xl:col-span-3">
+                <WeeklyUsageChart data={[]} />
+              </div>
+              <div className="xl:col-span-2">
+                <MetricCardGrid tokenTotals={tokenTotals} />
+              </div>
+            </div>
+
+            {/* Row: Recent Events + Limit Summary */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <RecentEventsCard events={[]} />
+              <LimitSummaryCard weeklyWindow={weeklyWindow} />
+            </div>
+          </div>
+        );
+    }
+  };
+
+  return (
+    <div className="p-6 space-y-4" style={{ animation: 'fade-in 300ms ease-out' }}>
+      <DashboardHeader />
+      {renderActiveView()}
     </div>
   );
 }
