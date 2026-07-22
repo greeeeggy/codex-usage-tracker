@@ -45,6 +45,42 @@ pub struct TokenTotals {
     pub all_time_recorded: TokenBreakdown,
 }
 
+/// A single quota sample data point for the frontend
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaSampleRow {
+    pub captured_at: i64,
+    pub window_kind: String,
+    pub used_percent: f64,
+    pub remaining_percent: f64,
+}
+
+/// Usage deltas derived from quota samples over different time periods
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageDeltas {
+    /// Change in used_percent during the current session (since app start)
+    pub session_delta: f64,
+    /// Change in used_percent today (since midnight)
+    pub today_delta: f64,
+    /// Peak used_percent value seen in the last hour
+    pub peak_hour_used: f64,
+    /// Number of distinct monitoring sessions (connect→dormant transitions) today
+    pub sessions_today: i64,
+    /// Longest continuous monitoring stretch in minutes today
+    pub longest_session_minutes: i64,
+}
+
+/// An application event for the event log
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppEvent {
+    pub event_type: String,
+    pub label: String,
+    pub timestamp: String,
+    pub description: Option<String>,
+}
+
 pub struct Db {
     conn: Arc<Mutex<Connection>>,
 }
@@ -142,13 +178,246 @@ impl Db {
                 updated_at INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS app_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                label TEXT NOT NULL,
+                captured_at INTEGER NOT NULL,
+                description TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_token_events_account ON token_events(account_key);
             CREATE INDEX IF NOT EXISTS idx_token_events_captured ON token_events(captured_at);
+            CREATE INDEX IF NOT EXISTS idx_quota_samples_captured ON quota_samples(captured_at);
+            CREATE INDEX IF NOT EXISTS idx_quota_samples_kind ON quota_samples(window_kind, captured_at);
+            CREATE INDEX IF NOT EXISTS idx_app_events_captured ON app_events(captured_at);
             "
         ).map_err(|e| format!("Failed to initialize schema: {}", e))?;
 
         Ok(())
     }
+
+    // ── Quota Samples ──────────────────────────────────────────────────
+
+    /// Persist a single rate-limit window data point.
+    pub fn insert_quota_sample(
+        &self,
+        account_key: &str,
+        captured_at: i64,
+        window_kind: &str,
+        duration_minutes: Option<u64>,
+        used_percent: f64,
+        remaining_percent: f64,
+        resets_at: Option<i64>,
+        source: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO quota_samples (account_key, captured_at, window_kind, duration_minutes, used_percent, remaining_percent, resets_at, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                account_key,
+                captured_at,
+                window_kind,
+                duration_minutes.map(|v| v as i64),
+                used_percent,
+                remaining_percent,
+                resets_at,
+                source,
+            ],
+        ).map_err(|e| format!("Failed to insert quota sample: {}", e))?;
+        Ok(())
+    }
+
+    /// Get recent quota samples for a window kind within a time range.
+    /// Used to populate charts. Returns at most `limit` samples.
+    pub fn get_recent_quota_samples(
+        &self,
+        window_kind: &str,
+        since_ts: i64,
+        limit: i64,
+    ) -> Result<Vec<QuotaSampleRow>, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT captured_at, window_kind, used_percent, remaining_percent
+             FROM quota_samples
+             WHERE window_kind = ?1 AND captured_at >= ?2
+             ORDER BY captured_at ASC
+             LIMIT ?3"
+        ).map_err(|e| format!("Prepare failed: {}", e))?;
+
+        let rows = stmt.query_map(params![window_kind, since_ts, limit], |row| {
+            Ok(QuotaSampleRow {
+                captured_at: row.get(0)?,
+                window_kind: row.get(1)?,
+                used_percent: row.get(2)?,
+                remaining_percent: row.get(3)?,
+            })
+        }).map_err(|e| format!("Query failed: {}", e))?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row.map_err(|e| format!("Row error: {}", e))?);
+        }
+        Ok(results)
+    }
+
+    /// Compute usage deltas from quota samples for a given window kind.
+    pub fn get_usage_deltas(
+        &self,
+        window_kind: &str,
+        session_start_ts: i64,
+    ) -> Result<UsageDeltas, String> {
+        let conn = self.conn.lock().unwrap();
+        let now = Local::now();
+
+        let today_start = now.date_naive().and_hms_opt(0, 0, 0).unwrap();
+        let today_start_ts = Local.from_local_datetime(&today_start).unwrap().timestamp();
+        let one_hour_ago = chrono::Utc::now().timestamp() - 3600;
+
+        // Session delta: difference between first and latest sample since session start
+        let session_delta = Self::calc_delta(&conn, window_kind, session_start_ts)?;
+
+        // Today delta: difference between first and latest sample since midnight
+        let today_delta = Self::calc_delta(&conn, window_kind, today_start_ts)?;
+
+        // Peak hour: max used_percent in the last hour
+        let peak_hour_used: f64 = conn.query_row(
+            "SELECT COALESCE(MAX(used_percent), 0.0) FROM quota_samples WHERE window_kind = ?1 AND captured_at >= ?2",
+            params![window_kind, one_hour_ago],
+            |row| row.get(0),
+        ).unwrap_or(0.0);
+
+        // Sessions today: count distinct monitoring sessions by counting app_events of type session_started
+        let sessions_today: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM app_events WHERE event_type = 'session_started' AND captured_at >= ?1",
+            params![today_start_ts],
+            |row| row.get(0),
+        ).unwrap_or(0);
+
+        // Longest session: find the longest gap between session_started and session_ended today
+        let longest_session_minutes = Self::calc_longest_session(&conn, today_start_ts)?;
+
+        Ok(UsageDeltas {
+            session_delta,
+            today_delta,
+            peak_hour_used,
+            sessions_today,
+            longest_session_minutes,
+        })
+    }
+
+    fn calc_delta(conn: &Connection, window_kind: &str, since_ts: i64) -> Result<f64, String> {
+        let first: Option<f64> = conn.query_row(
+            "SELECT used_percent FROM quota_samples WHERE window_kind = ?1 AND captured_at >= ?2 ORDER BY captured_at ASC LIMIT 1",
+            params![window_kind, since_ts],
+            |row| row.get(0),
+        ).ok();
+
+        let latest: Option<f64> = conn.query_row(
+            "SELECT used_percent FROM quota_samples WHERE window_kind = ?1 AND captured_at >= ?2 ORDER BY captured_at DESC LIMIT 1",
+            params![window_kind, since_ts],
+            |row| row.get(0),
+        ).ok();
+
+        match (first, latest) {
+            (Some(f), Some(l)) => Ok((l - f).max(0.0)),
+            _ => Ok(0.0),
+        }
+    }
+
+    fn calc_longest_session(conn: &Connection, since_ts: i64) -> Result<i64, String> {
+        // Get all session start/end events today, ordered by time
+        let mut stmt = conn.prepare(
+            "SELECT event_type, captured_at FROM app_events
+             WHERE event_type IN ('session_started', 'session_ended') AND captured_at >= ?1
+             ORDER BY captured_at ASC"
+        ).map_err(|e| format!("Prepare failed: {}", e))?;
+
+        let events: Vec<(String, i64)> = stmt.query_map(params![since_ts], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        }).map_err(|e| format!("Query failed: {}", e))?
+          .filter_map(|r| r.ok())
+          .collect();
+
+        let mut longest = 0i64;
+        let mut session_start: Option<i64> = None;
+
+        for (event_type, ts) in &events {
+            if event_type == "session_started" {
+                session_start = Some(*ts);
+            } else if event_type == "session_ended" {
+                if let Some(start) = session_start {
+                    let duration = (*ts - start) / 60;
+                    if duration > longest {
+                        longest = duration;
+                    }
+                    session_start = None;
+                }
+            }
+        }
+
+        // If there's an open session, count until now
+        if let Some(start) = session_start {
+            let duration = (chrono::Utc::now().timestamp() - start) / 60;
+            if duration > longest {
+                longest = duration;
+            }
+        }
+
+        Ok(longest)
+    }
+
+    // ── App Events ─────────────────────────────────────────────────────
+
+    /// Record an application event (state transitions, connections, etc.)
+    pub fn insert_app_event(
+        &self,
+        event_type: &str,
+        label: &str,
+        description: Option<&str>,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO app_events (event_type, label, captured_at, description) VALUES (?1, ?2, ?3, ?4)",
+            params![event_type, label, now, description],
+        ).map_err(|e| format!("Failed to insert app event: {}", e))?;
+        Ok(())
+    }
+
+    /// Get recent app events, newest first. Returns at most `limit` events.
+    pub fn get_recent_events(&self, limit: i64) -> Result<Vec<AppEvent>, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT event_type, label, captured_at, description
+             FROM app_events
+             ORDER BY captured_at DESC
+             LIMIT ?1"
+        ).map_err(|e| format!("Prepare failed: {}", e))?;
+
+        let rows = stmt.query_map(params![limit], |row| {
+            let ts: i64 = row.get(2)?;
+            let dt = chrono::DateTime::from_timestamp(ts, 0)
+                .map(|dt| dt.format("%H:%M:%S").to_string())
+                .unwrap_or_else(|| "—".to_string());
+
+            Ok(AppEvent {
+                event_type: row.get(0)?,
+                label: row.get(1)?,
+                timestamp: dt,
+                description: row.get(3)?,
+            })
+        }).map_err(|e| format!("Query failed: {}", e))?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row.map_err(|e| format!("Row error: {}", e))?);
+        }
+        Ok(results)
+    }
+
+    // ── Token Events (existing) ────────────────────────────────────────
 
     /// Insert or replace a final turn token event.
     pub fn insert_token_event(&self, event: &TokenEvent) -> Result<(), String> {

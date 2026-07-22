@@ -1,13 +1,16 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, Event } from '@tauri-apps/api/event';
-import { MonitorState, MonitorStateResponse, UsageSnapshot, UsageWindow, TokenTotals } from '../types/usage';
+import { MonitorState, MonitorStateResponse, UsageSnapshot, UsageWindow, TokenTotals, QuotaSampleRow, UsageDeltas, AppEvent } from '../types/usage';
 
 export type AppPage = 'overview' | 'usage' | 'history' | 'limits' | 'sessions' | 'insights' | 'settings';
 
 interface UsageState {
   snapshot: UsageSnapshot | null;
   tokenTotals: TokenTotals | null;
+  quotaHistory: QuotaSampleRow[];
+  usageDeltas: UsageDeltas | null;
+  recentEvents: AppEvent[];
   monitorState: MonitorState;
   errorMessage: string | null;
   detectedClients: { clientType: string; name: string }[];
@@ -30,6 +33,9 @@ interface UsageState {
 export const useUsageStore = create<UsageState>((set, get) => ({
   snapshot: null,
   tokenTotals: null,
+  quotaHistory: [],
+  usageDeltas: null,
+  recentEvents: [],
   monitorState: 'dormant',
   errorMessage: null,
   detectedClients: [],
@@ -68,10 +74,24 @@ export const useUsageStore = create<UsageState>((set, get) => ({
         set({ tokenTotals });
       }
 
+      // Load initial history and events
+      const loadExtras = async () => {
+        try {
+          const quotaHistory = await invoke<QuotaSampleRow[]>('get_quota_history', { windowKind: 'weekly', sinceHours: 168 });
+          const recentEvents = await invoke<AppEvent[]>('get_recent_events');
+          const usageDeltas = await invoke<UsageDeltas>('get_usage_deltas');
+          set({ quotaHistory, recentEvents, usageDeltas });
+        } catch (e) {
+          console.error('Failed to load extra data:', e);
+        }
+      };
+      await loadExtras();
+
       // Listen for updates
       await listen('usage-updated', (event: Event<UsageSnapshot>) => {
         console.log('Usage updated:', event.payload);
         set({ snapshot: event.payload });
+        loadExtras(); // Refresh derived metrics on usage update
       });
 
       await listen('token-totals-updated', (event: Event<TokenTotals>) => {

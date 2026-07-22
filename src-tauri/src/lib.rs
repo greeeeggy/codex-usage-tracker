@@ -40,9 +40,11 @@ pub fn run() {
             // Create the shared usage state
             let usage_service = UsageService::new(app_handle.clone());
             let shared_state = usage_service.state();
+            let db = usage_service.db();
 
             // Store the shared state for Tauri commands
             app.manage(shared_state.clone());
+            app.manage(db);
 
             // Create SSE broadcast channel for local server
             let (sse_tx, _) = tokio::sync::broadcast::channel::<String>(100);
@@ -213,6 +215,9 @@ pub fn run() {
             commands::refresh_usage,
             commands::toggle_widget,
             commands::show_dashboard,
+            commands::get_quota_history,
+            commands::get_recent_events,
+            commands::get_usage_deltas,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

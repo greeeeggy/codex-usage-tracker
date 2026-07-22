@@ -58,3 +58,25 @@ export interface TokenTotals {
   currentMonth: TokenBreakdown;
   allTimeRecorded: TokenBreakdown;
 }
+
+export interface QuotaSampleRow {
+  capturedAt: number; // Unix timestamp
+  windowKind: string;
+  usedPercent: number;
+  remainingPercent: number;
+}
+
+export interface UsageDeltas {
+  sessionDelta: number;
+  todayDelta: number;
+  peakHourUsed: number;
+  sessionsToday: number;
+  longestSessionMinutes: number;
+}
+
+export interface AppEvent {
+  eventType: string;
+  label: string;
+  timestamp: string;
+  description?: string;
+}

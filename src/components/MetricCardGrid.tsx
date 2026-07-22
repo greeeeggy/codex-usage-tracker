@@ -1,10 +1,11 @@
 import { MetricCard } from './MetricCard';
 import { Clock, MonitorDot, Zap, Timer } from 'lucide-react';
-import { TokenTotals } from '../types/usage';
-import { formatTokensAsDuration } from '../utils/cn';
+import { TokenTotals, UsageDeltas } from '../types/usage';
+import { formatTokensAsDuration, formatNumber } from '../utils/cn';
 
 interface MetricCardGridProps {
   tokenTotals: TokenTotals | null;
+  usageDeltas: UsageDeltas | null;
 }
 
 /** Mini bar visualization (sparkline-like) */
@@ -27,18 +28,24 @@ function MiniBarViz({ heights, color }: { heights: number[]; color: string }) {
   );
 }
 
-export function MetricCardGrid({ tokenTotals }: MetricCardGridProps) {
+export function MetricCardGrid({ tokenTotals, usageDeltas }: MetricCardGridProps) {
   // Today's usage: derive from tokenTotals.today if available
   const todayTokens = tokenTotals?.today.totalTokens ?? null;
-  const todayValue = todayTokens !== null && todayTokens > 0 ? formatTokensAsDuration(todayTokens) : null;
+  const todayValue = todayTokens !== null && todayTokens > 0 
+    ? formatNumber(todayTokens) 
+    : (usageDeltas?.todayDelta ? `+${usageDeltas.todayDelta.toFixed(1)}%` : null);
+
+  const subtext = todayTokens !== null && todayTokens > 0 
+    ? `${todayTokens.toLocaleString()} total tokens` 
+    : (usageDeltas?.todayDelta ? `Quota used today` : undefined);
 
   return (
     <div className="grid grid-cols-2 gap-4">
       <MetricCard
         icon={<Clock size={15} />}
-        label="Today's Usage"
+        label={todayTokens !== null && todayTokens > 0 ? "Today's Tokens" : "Today's Usage"}
         value={todayValue}
-        subtext={todayTokens !== null && todayTokens > 0 ? `${(todayTokens).toLocaleString()} tokens` : undefined}
+        subtext={subtext}
         visualization={
           todayValue ? <MiniBarViz heights={[6, 10, 8, 14, 12, 16, 14]} color="var(--purple)" /> : undefined
         }
@@ -47,24 +54,24 @@ export function MetricCardGrid({ tokenTotals }: MetricCardGridProps) {
       <MetricCard
         icon={<MonitorDot size={15} />}
         label="Sessions"
-        value={null}
-        subtext={undefined}
+        value={usageDeltas?.sessionsToday?.toString() || null}
+        subtext={usageDeltas?.sessionsToday ? 'Sessions today' : undefined}
         visualization={undefined}
       />
 
       <MetricCard
         icon={<Zap size={15} />}
         label="Peak Activity"
-        value={null}
-        subtext={undefined}
+        value={usageDeltas?.peakHourUsed ? `${usageDeltas.peakHourUsed.toFixed(1)}%` : null}
+        subtext={usageDeltas?.peakHourUsed ? 'Peak usage per hour' : undefined}
         visualization={undefined}
       />
 
       <MetricCard
         icon={<Timer size={15} />}
         label="Longest Session"
-        value={null}
-        subtext={undefined}
+        value={usageDeltas?.longestSessionMinutes ? `${usageDeltas.longestSessionMinutes}m` : null}
+        subtext={usageDeltas?.longestSessionMinutes ? 'Longest session today' : undefined}
         visualization={undefined}
       />
     </div>

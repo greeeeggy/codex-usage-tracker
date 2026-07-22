@@ -14,6 +14,9 @@ export function Dashboard() {
   const refresh = useUsageStore((s) => s.refresh);
   const snapshot = useUsageStore((s) => s.snapshot);
   const tokenTotals = useUsageStore((s) => s.tokenTotals);
+  const quotaHistory = useUsageStore((s) => s.quotaHistory);
+  const usageDeltas = useUsageStore((s) => s.usageDeltas);
+  const recentEvents = useUsageStore((s) => s.recentEvents);
   const monitorState = useUsageStore((s) => s.monitorState);
   const errorMessage = useUsageStore((s) => s.errorMessage);
   const detectedClients = useUsageStore((s) => s.detectedClients);
@@ -152,7 +155,7 @@ export function Dashboard() {
             <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
               <HistoryIcon size={20} style={{ color: 'var(--purple)' }} /> Usage & Quota History
             </h2>
-            <WeeklyUsageChart data={[]} />
+            <WeeklyUsageChart data={quotaHistory.map(h => ({ timestamp: new Date(h.capturedAt * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), value: h.usedPercent }))} />
           </div>
         );
 
@@ -221,19 +224,19 @@ export function Dashboard() {
               <div className="rounded-2xl p-5" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-default)' }}>
                 <span className="text-xs font-medium block mb-1" style={{ color: 'var(--text-muted)' }}>Today's Total</span>
                 <span className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>
-                  {tokenTotals?.today.totalTokens ? formatTokensAsDuration(tokenTotals.today.totalTokens) : '0m'}
+                  {tokenTotals?.today.totalTokens ? formatNumber(tokenTotals.today.totalTokens) : '0'}
                 </span>
               </div>
               <div className="rounded-2xl p-5" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-default)' }}>
                 <span className="text-xs font-medium block mb-1" style={{ color: 'var(--text-muted)' }}>This Month Total</span>
                 <span className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>
-                  {tokenTotals?.currentMonth.totalTokens ? formatTokensAsDuration(tokenTotals.currentMonth.totalTokens) : '0m'}
+                  {tokenTotals?.currentMonth.totalTokens ? formatNumber(tokenTotals.currentMonth.totalTokens) : '0'}
                 </span>
               </div>
               <div className="rounded-2xl p-5" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-default)' }}>
                 <span className="text-xs font-medium block mb-1" style={{ color: 'var(--text-muted)' }}>All-Time Total</span>
                 <span className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>
-                  {tokenTotals?.allTimeRecorded.totalTokens ? formatTokensAsDuration(tokenTotals.allTimeRecorded.totalTokens) : '0m'}
+                  {tokenTotals?.allTimeRecorded.totalTokens ? formatNumber(tokenTotals.allTimeRecorded.totalTokens) : '0'}
                 </span>
               </div>
             </div>
@@ -285,16 +288,16 @@ export function Dashboard() {
             {/* Row: Chart + Metric cards */}
             <div className="grid grid-cols-1 xl:grid-cols-5 gap-4">
               <div className="xl:col-span-3">
-                <WeeklyUsageChart data={[]} />
+                <WeeklyUsageChart data={quotaHistory.map(h => ({ timestamp: new Date(h.capturedAt * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), value: h.usedPercent }))} />
               </div>
               <div className="xl:col-span-2">
-                <MetricCardGrid tokenTotals={tokenTotals} />
+                <MetricCardGrid tokenTotals={tokenTotals} usageDeltas={usageDeltas} />
               </div>
             </div>
 
             {/* Row: Recent Events + Limit Summary */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <RecentEventsCard events={[]} />
+              <RecentEventsCard events={recentEvents as any} />
               <LimitSummaryCard weeklyWindow={weeklyWindow} />
             </div>
           </div>

@@ -52,6 +52,36 @@ pub async fn refresh_usage(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Tauri command: Get quota sample history for charts
+#[tauri::command]
+pub async fn get_quota_history(
+    db: tauri::State<'_, Arc<crate::db::Db>>,
+    window_kind: String,
+    since_hours: Option<u64>,
+) -> Result<Vec<crate::db::QuotaSampleRow>, String> {
+    let hours = since_hours.unwrap_or(168); // default: 1 week
+    let since_ts = chrono::Utc::now().timestamp() - (hours as i64 * 3600);
+    db.get_recent_quota_samples(&window_kind, since_ts, 500)
+}
+
+/// Tauri command: Get recent app events for the event log
+#[tauri::command]
+pub async fn get_recent_events(
+    db: tauri::State<'_, Arc<crate::db::Db>>,
+) -> Result<Vec<crate::db::AppEvent>, String> {
+    db.get_recent_events(20)
+}
+
+/// Tauri command: Get usage deltas derived from quota samples
+#[tauri::command]
+pub async fn get_usage_deltas(
+    db: tauri::State<'_, Arc<crate::db::Db>>,
+    state: tauri::State<'_, Arc<RwLock<UsageState>>>,
+) -> Result<crate::db::UsageDeltas, String> {
+    let s = state.read().await;
+    db.get_usage_deltas("weekly", s.session_start_ts)
+}
+
 /// Tauri command: Toggle the overlay widget visibility
 #[tauri::command]
 pub async fn toggle_widget(app: tauri::AppHandle) -> Result<(), String> {
@@ -94,3 +124,4 @@ pub struct DetectedClientInfo {
     pub client_type: String,
     pub name: String,
 }
+

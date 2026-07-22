@@ -213,11 +213,13 @@ impl CodexClient {
                                     }
                                 } else if method == "thread/tokenUsage/updated" {
                                     if let Some(params) = msg.params {
-                                        let input_tokens = params.get("inputTokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                                        let cached_input_tokens = params.get("cachedInputTokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                                        let output_tokens = params.get("outputTokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                                        let reasoning_tokens = params.get("reasoningTokens").and_then(|v| v.as_i64());
-                                        let total_tokens = input_tokens + output_tokens;
+                                        let usage_params = params.get("tokenUsage").unwrap_or(&params);
+                                        let input_tokens = usage_params.get("inputTokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                                        let cached_input_tokens = usage_params.get("cachedInputTokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                                        let output_tokens = usage_params.get("outputTokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                                        let reasoning_tokens = usage_params.get("reasoningTokens").and_then(|v| v.as_i64());
+                                        let total_tokens = usage_params.get("totalTokens").and_then(|v| v.as_i64()).unwrap_or(input_tokens + output_tokens);
+
                                         
                                         let event = crate::db::TokenEvent {
                                             id: uuid::Uuid::new_v4().to_string(),
