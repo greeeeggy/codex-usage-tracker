@@ -28,6 +28,9 @@ pub struct UsageSnapshot {
     pub rate_limit_reached_type: Option<String>,
     pub credits: Option<serde_json::Value>,
     pub windows: Vec<UsageWindow>,
+    pub latest_context_window: Option<i64>,
+    pub latest_context_load_percent: Option<f64>,
+    pub latest_last_request_tokens: Option<crate::db::TokenBreakdown>,
 }
 
 /// A single rate-limit window (e.g., 5-hour or weekly)
@@ -40,6 +43,31 @@ pub struct UsageWindow {
     pub used_percent: f64,
     pub remaining_percent: f64,
     pub resets_at: Option<String>,
+}
+
+/// Account-level token activity returned by `account/usage/read`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountUsage {
+    pub summary: Option<AccountUsageSummary>,
+    pub daily_usage_buckets: Option<Vec<DailyUsageBucket>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountUsageSummary {
+    pub lifetime_tokens: Option<i64>,
+    pub peak_daily_tokens: Option<i64>,
+    pub longest_running_turn_sec: Option<i64>,
+    pub current_streak_days: Option<i64>,
+    pub longest_streak_days: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyUsageBucket {
+    pub start_date: String,
+    pub tokens: i64,
 }
 
 /// Raw JSON-RPC message
@@ -70,7 +98,6 @@ struct RawWindow {
     #[serde(alias = "resetsAt", alias = "resets_at")]
     resets_at: Option<f64>,
 }
-
 
 /// Raw rate-limit snapshot from Codex
 #[derive(Debug, Deserialize)]
@@ -213,21 +240,47 @@ impl CodexClient {
                                     }
                                 } else if method == "thread/tokenUsage/updated" {
                                     if let Some(params) = msg.params {
-                                        let usage_params = params.get("tokenUsage").unwrap_or(&params);
-                                        let input_tokens = usage_params.get("inputTokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                                        let cached_input_tokens = usage_params.get("cachedInputTokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                                        let output_tokens = usage_params.get("outputTokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                                        let reasoning_tokens = usage_params.get("reasoningTokens").and_then(|v| v.as_i64());
-                                        let total_tokens = usage_params.get("totalTokens").and_then(|v| v.as_i64()).unwrap_or(input_tokens + output_tokens);
+                                        // Current app-server notifications wrap the request
+                                        // breakdown in tokenUsage.last and the cumulative
+                                        // breakdown in tokenUsage.total.
+                                        let token_usage =
+                                            params.get("tokenUsage").unwrap_or(&params);
+                                        let usage_params =
+                                            token_usage.get("last").unwrap_or(token_usage);
+                                        let input_tokens = usage_params
+                                            .get("inputTokens")
+                                            .and_then(|v| v.as_i64())
+                                            .unwrap_or(0);
+                                        let cached_input_tokens = usage_params
+                                            .get("cachedInputTokens")
+                                            .and_then(|v| v.as_i64())
+                                            .unwrap_or(0);
+                                        let output_tokens = usage_params
+                                            .get("outputTokens")
+                                            .and_then(|v| v.as_i64())
+                                            .unwrap_or(0);
+                                        let reasoning_tokens = usage_params
+                                            .get("reasoningOutputTokens")
+                                            .or_else(|| usage_params.get("reasoningTokens"))
+                                            .and_then(|v| v.as_i64());
+                                        let total_tokens = usage_params
+                                            .get("totalTokens")
+                                            .and_then(|v| v.as_i64())
+                                            .unwrap_or(input_tokens + output_tokens);
 
-                                        
                                         let event = crate::db::TokenEvent {
                                             id: uuid::Uuid::new_v4().to_string(),
                                             account_key: "default".to_string(),
                                             captured_at: chrono::Utc::now().timestamp(),
                                             client_type: "unknown".to_string(),
-                                            thread_id: params.get("threadId").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                                            turn_id: params.get("turnId").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                            thread_id: params
+                                                .get("threadId")
+                                                .and_then(|v| v.as_str())
+                                                .map(|s| s.to_string()),
+                                            turn_id: params
+                                                .get("turnId")
+                                                .and_then(|v| v.as_str())
+                                                .map(|s| s.to_string()),
                                             project_path_hash: None,
                                             model: None,
                                             input_tokens,
@@ -237,8 +290,9 @@ impl CodexClient {
                                             total_tokens,
                                             event_type: "turn_final".to_string(),
                                         };
-                                        
-                                        let _ = event_tx_reader.send(CodexEvent::TokenUsageUpdated(event));
+
+                                        let _ = event_tx_reader
+                                            .send(CodexEvent::TokenUsageUpdated(event));
                                     }
                                 }
                             }
@@ -369,7 +423,10 @@ impl CodexClient {
     /// Fetch current rate limits
     pub async fn read_rate_limits(&self) -> Result<UsageSnapshot, String> {
         let result = self.request("account/rateLimits/read", None).await?;
-        log::info!("[CODEX] Raw rate limits response: {}", serde_json::to_string_pretty(&result).unwrap_or_default());
+        log::info!(
+            "[CODEX] Raw rate limits response: {}",
+            serde_json::to_string_pretty(&result).unwrap_or_default()
+        );
 
         // Try to extract rate limits from the response
         let snapshot_value = result
@@ -378,14 +435,29 @@ impl CodexClient {
             .or_else(|| result.get("rateLimits"))
             .ok_or("Codex returned no rate-limit snapshot")?;
 
-        log::info!("[CODEX] Extracted snapshot value: {}", serde_json::to_string_pretty(&snapshot_value).unwrap_or_default());
+        log::info!(
+            "[CODEX] Extracted snapshot value: {}",
+            serde_json::to_string_pretty(&snapshot_value).unwrap_or_default()
+        );
 
         let raw: RawSnapshot = serde_json::from_value(snapshot_value.clone())
             .map_err(|e| format!("Failed to parse rate limits: {}", e))?;
 
-        log::info!("[CODEX] Parsed raw snapshot: planType={:?}, primary={:?}, secondary={:?}", raw.plan_type, raw.primary.is_some(), raw.secondary.is_some());
+        log::info!(
+            "[CODEX] Parsed raw snapshot: planType={:?}, primary={:?}, secondary={:?}",
+            raw.plan_type,
+            raw.primary.is_some(),
+            raw.secondary.is_some()
+        );
 
         Ok(normalize_snapshot(&raw))
+    }
+
+    /// Fetch authoritative account-level token activity from Codex.
+    pub async fn read_account_usage(&self) -> Result<AccountUsage, String> {
+        let result = self.request("account/usage/read", None).await?;
+        serde_json::from_value(result)
+            .map_err(|e| format!("Failed to parse account token usage: {}", e))
     }
 
     /// Stop the client
@@ -447,6 +519,9 @@ fn normalize_snapshot(raw: &RawSnapshot) -> UsageSnapshot {
         rate_limit_reached_type: raw.rate_limit_reached_type.clone(),
         credits: raw.credits.clone(),
         windows,
+        latest_context_window: None,
+        latest_context_load_percent: None,
+        latest_last_request_tokens: None,
     }
 }
 
@@ -483,5 +558,69 @@ fn normalize_window(source: &str, raw: &RawWindow) -> UsageWindow {
         used_percent: used,
         remaining_percent: remaining,
         resets_at,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_five_hour_and_weekly_windows() {
+        let raw = RawSnapshot {
+            limit_id: Some("codex".to_string()),
+            limit_name: None,
+            plan_type: Some("plus".to_string()),
+            rate_limit_reached_type: None,
+            credits: None,
+            primary: Some(RawWindow {
+                window_duration_mins: Some(300),
+                used_percent: Some(8.0),
+                remaining_percent: None,
+                resets_at: Some(1_800_000_000.0),
+            }),
+            secondary: Some(RawWindow {
+                window_duration_mins: Some(10_080),
+                used_percent: Some(11.0),
+                remaining_percent: None,
+                resets_at: Some(1_800_604_800.0),
+            }),
+        };
+
+        let snapshot = normalize_snapshot(&raw);
+        assert_eq!(snapshot.windows.len(), 2);
+        assert_eq!(snapshot.windows[0].name, "fiveHour");
+        assert_eq!(snapshot.windows[0].remaining_percent, 92.0);
+        assert_eq!(snapshot.windows[1].name, "weekly");
+        assert_eq!(snapshot.windows[1].remaining_percent, 89.0);
+    }
+
+    #[test]
+    fn parses_account_usage_response() {
+        let usage: AccountUsage = serde_json::from_value(serde_json::json!({
+            "summary": {
+                "lifetimeTokens": 1234567,
+                "peakDailyTokens": 45678,
+                "longestRunningTurnSec": 540,
+                "currentStreakDays": 8,
+                "longestStreakDays": 14
+            },
+            "dailyUsageBuckets": [
+                { "startDate": "2026-08-30", "tokens": 12345 }
+            ],
+            "threadUsage": null
+        }))
+        .expect("account usage should deserialize");
+
+        assert_eq!(
+            usage.summary.and_then(|summary| summary.lifetime_tokens),
+            Some(1_234_567)
+        );
+        assert_eq!(
+            usage
+                .daily_usage_buckets
+                .and_then(|buckets| buckets.first().map(|bucket| bucket.tokens)),
+            Some(12_345)
+        );
     }
 }

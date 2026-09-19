@@ -71,6 +71,14 @@ html, body {
   overflow: hidden;
 }
 
+/* The frameless overlay must not inherit the opaque dashboard canvas. */
+html.overlay-window,
+html.overlay-window body,
+html.overlay-window #root {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
 /* ─── Scrollbar ─── */
 ::-webkit-scrollbar {
   width: 6px;
@@ -98,6 +106,10 @@ html, body {
 [data-tauri-drag-region] button,
 [data-tauri-drag-region] a,
 [data-tauri-drag-region] input {
+  -webkit-app-region: no-drag;
+}
+
+[data-resize-handle] {
   -webkit-app-region: no-drag;
 }
 

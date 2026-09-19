@@ -26,11 +26,12 @@
       {
         "label": "overlay",
         "title": "Codex Usage",
-        "width": 360,
-        "height": 185,
+        "width": 300,
+        "height": 170,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,
+        "maximizable": false,
         "skipTaskbar": true,
         "resizable": true,
         "visible": false

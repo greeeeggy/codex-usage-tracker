@@ -1,4 +1,4 @@
-use chrono::{Local, TimeZone, Datelike};
+use chrono::{Datelike, Local, TimeZone};
 use rusqlite::{params, Connection, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -100,8 +100,8 @@ impl Db {
         let db_path = app_dir.join("codex_meter.db");
         log::info!("Initializing SQLite database at: {:?}", db_path);
 
-        let conn = Connection::open(&db_path)
-            .map_err(|e| format!("Failed to open database: {}", e))?;
+        let conn =
+            Connection::open(&db_path).map_err(|e| format!("Failed to open database: {}", e))?;
 
         let db = Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -238,22 +238,30 @@ impl Db {
         limit: i64,
     ) -> Result<Vec<QuotaSampleRow>, String> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT captured_at, window_kind, used_percent, remaining_percent
-             FROM quota_samples
-             WHERE window_kind = ?1 AND captured_at >= ?2
-             ORDER BY captured_at ASC
-             LIMIT ?3"
-        ).map_err(|e| format!("Prepare failed: {}", e))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT captured_at, window_kind, used_percent, remaining_percent
+             FROM (
+                 SELECT captured_at, window_kind, used_percent, remaining_percent
+                 FROM quota_samples
+                 WHERE window_kind = ?1 AND captured_at >= ?2
+                 ORDER BY captured_at DESC
+                 LIMIT ?3
+             )
+             ORDER BY captured_at ASC",
+            )
+            .map_err(|e| format!("Prepare failed: {}", e))?;
 
-        let rows = stmt.query_map(params![window_kind, since_ts, limit], |row| {
-            Ok(QuotaSampleRow {
-                captured_at: row.get(0)?,
-                window_kind: row.get(1)?,
-                used_percent: row.get(2)?,
-                remaining_percent: row.get(3)?,
+        let rows = stmt
+            .query_map(params![window_kind, since_ts, limit], |row| {
+                Ok(QuotaSampleRow {
+                    captured_at: row.get(0)?,
+                    window_kind: row.get(1)?,
+                    used_percent: row.get(2)?,
+                    remaining_percent: row.get(3)?,
+                })
             })
-        }).map_err(|e| format!("Query failed: {}", e))?;
+            .map_err(|e| format!("Query failed: {}", e))?;
 
         let mut results = Vec::new();
         for row in rows {
@@ -328,17 +336,21 @@ impl Db {
 
     fn calc_longest_session(conn: &Connection, since_ts: i64) -> Result<i64, String> {
         // Get all session start/end events today, ordered by time
-        let mut stmt = conn.prepare(
-            "SELECT event_type, captured_at FROM app_events
+        let mut stmt = conn
+            .prepare(
+                "SELECT event_type, captured_at FROM app_events
              WHERE event_type IN ('session_started', 'session_ended') AND captured_at >= ?1
-             ORDER BY captured_at ASC"
-        ).map_err(|e| format!("Prepare failed: {}", e))?;
+             ORDER BY captured_at ASC",
+            )
+            .map_err(|e| format!("Prepare failed: {}", e))?;
 
-        let events: Vec<(String, i64)> = stmt.query_map(params![since_ts], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        }).map_err(|e| format!("Query failed: {}", e))?
-          .filter_map(|r| r.ok())
-          .collect();
+        let events: Vec<(String, i64)> = stmt
+            .query_map(params![since_ts], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|e| format!("Query failed: {}", e))?
+            .filter_map(|r| r.ok())
+            .collect();
 
         let mut longest = 0i64;
         let mut session_start: Option<i64> = None;
@@ -389,26 +401,30 @@ impl Db {
     /// Get recent app events, newest first. Returns at most `limit` events.
     pub fn get_recent_events(&self, limit: i64) -> Result<Vec<AppEvent>, String> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT event_type, label, captured_at, description
+        let mut stmt = conn
+            .prepare(
+                "SELECT event_type, label, captured_at, description
              FROM app_events
              ORDER BY captured_at DESC
-             LIMIT ?1"
-        ).map_err(|e| format!("Prepare failed: {}", e))?;
+             LIMIT ?1",
+            )
+            .map_err(|e| format!("Prepare failed: {}", e))?;
 
-        let rows = stmt.query_map(params![limit], |row| {
-            let ts: i64 = row.get(2)?;
-            let dt = chrono::DateTime::from_timestamp(ts, 0)
-                .map(|dt| dt.format("%H:%M:%S").to_string())
-                .unwrap_or_else(|| "—".to_string());
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                let ts: i64 = row.get(2)?;
+                let dt = chrono::DateTime::from_timestamp(ts, 0)
+                    .map(|dt| dt.with_timezone(&Local).format("%H:%M:%S").to_string())
+                    .unwrap_or_else(|| "—".to_string());
 
-            Ok(AppEvent {
-                event_type: row.get(0)?,
-                label: row.get(1)?,
-                timestamp: dt,
-                description: row.get(3)?,
+                Ok(AppEvent {
+                    event_type: row.get(0)?,
+                    label: row.get(1)?,
+                    timestamp: dt,
+                    description: row.get(3)?,
+                })
             })
-        }).map_err(|e| format!("Query failed: {}", e))?;
+            .map_err(|e| format!("Query failed: {}", e))?;
 
         let mut results = Vec::new();
         for row in rows {
@@ -454,19 +470,28 @@ impl Db {
         Ok(())
     }
 
-    fn calculate_breakdown(conn: &Connection, account_key: &str, start_ts: i64, end_ts: i64) -> Result<TokenBreakdown, String> {
-        let mut stmt = conn.prepare(
-            "SELECT 
+    fn calculate_breakdown(
+        conn: &Connection,
+        account_key: &str,
+        start_ts: i64,
+        end_ts: i64,
+    ) -> Result<TokenBreakdown, String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT
                 COALESCE(SUM(input_tokens), 0),
                 COALESCE(SUM(cached_input_tokens), 0),
                 COALESCE(SUM(output_tokens), 0),
                 COALESCE(SUM(reasoning_tokens), 0),
                 COALESCE(SUM(total_tokens), 0)
              FROM token_events
-             WHERE account_key = ?1 AND captured_at >= ?2 AND captured_at <= ?3"
-        ).map_err(|e| format!("Prepare query failed: {}", e))?;
+             WHERE account_key = ?1 AND captured_at >= ?2 AND captured_at <= ?3",
+            )
+            .map_err(|e| format!("Prepare query failed: {}", e))?;
 
-        let mut rows = stmt.query(params![account_key, start_ts, end_ts]).map_err(|e| format!("Query failed: {}", e))?;
+        let mut rows = stmt
+            .query(params![account_key, start_ts, end_ts])
+            .map_err(|e| format!("Query failed: {}", e))?;
         if let Some(row) = rows.next().map_err(|e| format!("Next row failed: {}", e))? {
             let input_tokens: i64 = row.get(0).unwrap_or(0);
             let cached_input_tokens: i64 = row.get(1).unwrap_or(0);
@@ -483,34 +508,108 @@ impl Db {
                 total_tokens,
             });
         }
-        
+
+        Ok(TokenBreakdown::default())
+    }
+
+    fn calculate_latest_chat_breakdown(
+        conn: &Connection,
+        account_key: &str,
+    ) -> Result<TokenBreakdown, String> {
+        let thread_id = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT thread_id
+                     FROM token_events
+                     WHERE account_key = ?1
+                       AND thread_id IS NOT NULL
+                       AND event_type = 'local_rollout'
+                     ORDER BY captured_at DESC
+                     LIMIT 1",
+                )
+                .map_err(|e| format!("Prepare latest chat query failed: {}", e))?;
+            let mut rows = stmt
+                .query(params![account_key])
+                .map_err(|e| format!("Latest chat query failed: {}", e))?;
+            rows.next()
+                .map_err(|e| format!("Latest chat row failed: {}", e))?
+                .and_then(|row| row.get::<_, String>(0).ok())
+        };
+
+        let Some(thread_id) = thread_id else {
+            return Ok(TokenBreakdown::default());
+        };
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT
+                    COALESCE(SUM(input_tokens), 0),
+                    COALESCE(SUM(cached_input_tokens), 0),
+                    COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(reasoning_tokens), 0),
+                    COALESCE(SUM(total_tokens), 0)
+                 FROM token_events
+                 WHERE account_key = ?1 AND thread_id = ?2",
+            )
+            .map_err(|e| format!("Prepare current chat query failed: {}", e))?;
+        let mut rows = stmt
+            .query(params![account_key, thread_id])
+            .map_err(|e| format!("Current chat query failed: {}", e))?;
+        if let Some(row) = rows
+            .next()
+            .map_err(|e| format!("Current chat row failed: {}", e))?
+        {
+            let input_tokens = row.get(0).unwrap_or(0);
+            let cached_input_tokens = row.get(1).unwrap_or(0);
+            let output_tokens = row.get(2).unwrap_or(0);
+            let reasoning_tokens = row.get(3).unwrap_or(0);
+            let total_tokens = row.get(4).unwrap_or(0);
+            return Ok(TokenBreakdown {
+                input_tokens,
+                cached_input_tokens,
+                uncached_input_tokens: std::cmp::max(0, input_tokens - cached_input_tokens),
+                output_tokens,
+                reasoning_tokens: Some(reasoning_tokens),
+                total_tokens,
+            });
+        }
+
         Ok(TokenBreakdown::default())
     }
 
     pub fn get_token_totals(
-        &self, 
+        &self,
         account_key: &str,
-        session_start_ts: i64,
+        _session_start_ts: i64,
         five_hour_start_ts: i64,
         five_hour_end_ts: i64,
         weekly_start_ts: i64,
-        weekly_end_ts: i64
+        weekly_end_ts: i64,
     ) -> Result<TokenTotals, String> {
         let conn = self.conn.lock().unwrap();
 
         let now = Local::now();
-        
+
         let today_start = now.date_naive().and_hms_opt(0, 0, 0).unwrap();
         let today_start_ts = Local.from_local_datetime(&today_start).unwrap().timestamp();
-        
-        let month_start = chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), 1).unwrap().and_hms_opt(0, 0, 0).unwrap();
+
+        let month_start = chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
         let month_start_ts = Local.from_local_datetime(&month_start).unwrap().timestamp();
 
-        let current_session = Self::calculate_breakdown(&conn, account_key, session_start_ts, i64::MAX)?;
-        let five_hour_window = Self::calculate_breakdown(&conn, account_key, five_hour_start_ts, five_hour_end_ts)?;
-        let weekly_window = Self::calculate_breakdown(&conn, account_key, weekly_start_ts, weekly_end_ts)?;
+        // "Current session" is the active Codex chat, not the lifetime of this
+        // meter process. The previous process-start boundary made this stay at
+        // zero when the dashboard launched after a chat had already begun.
+        let current_session = Self::calculate_latest_chat_breakdown(&conn, account_key)?;
+        let five_hour_window =
+            Self::calculate_breakdown(&conn, account_key, five_hour_start_ts, five_hour_end_ts)?;
+        let weekly_window =
+            Self::calculate_breakdown(&conn, account_key, weekly_start_ts, weekly_end_ts)?;
         let today = Self::calculate_breakdown(&conn, account_key, today_start_ts, i64::MAX)?;
-        let current_month = Self::calculate_breakdown(&conn, account_key, month_start_ts, i64::MAX)?;
+        let current_month =
+            Self::calculate_breakdown(&conn, account_key, month_start_ts, i64::MAX)?;
         let all_time_recorded = Self::calculate_breakdown(&conn, account_key, 0, i64::MAX)?;
 
         Ok(TokenTotals {
@@ -521,5 +620,46 @@ impl Db {
             current_month,
             all_time_recorded,
         })
+    }
+
+    pub fn get_session_cumulative_totals(
+        &self,
+        session_id: &str,
+    ) -> Result<TokenBreakdown, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT
+                COALESCE(SUM(input_tokens), 0),
+                COALESCE(SUM(cached_input_tokens), 0),
+                COALESCE(SUM(output_tokens), 0),
+                COALESCE(SUM(reasoning_tokens), 0),
+                COALESCE(SUM(total_tokens), 0)
+             FROM token_events
+             WHERE thread_id = ?1",
+            )
+            .map_err(|e| format!("Prepare query failed: {}", e))?;
+
+        let mut rows = stmt
+            .query(params![session_id])
+            .map_err(|e| format!("Query failed: {}", e))?;
+        if let Some(row) = rows.next().map_err(|e| format!("Next row failed: {}", e))? {
+            let input_tokens: i64 = row.get(0).unwrap_or(0);
+            let cached_input_tokens: i64 = row.get(1).unwrap_or(0);
+            let output_tokens: i64 = row.get(2).unwrap_or(0);
+            let reasoning_tokens: i64 = row.get(3).unwrap_or(0);
+            let total_tokens: i64 = row.get(4).unwrap_or(0);
+
+            return Ok(TokenBreakdown {
+                input_tokens,
+                cached_input_tokens,
+                uncached_input_tokens: std::cmp::max(0, input_tokens - cached_input_tokens),
+                output_tokens,
+                reasoning_tokens: Some(reasoning_tokens),
+                total_tokens,
+            });
+        }
+
+        Ok(TokenBreakdown::default())
     }
 }

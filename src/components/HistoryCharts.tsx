@@ -16,9 +16,10 @@ interface ChartDataPoint {
 
 interface WeeklyUsageChartProps {
   data: ChartDataPoint[];
+  onViewHistory?: () => void;
 }
 
-export function WeeklyUsageChart({ data }: WeeklyUsageChartProps) {
+export function WeeklyUsageChart({ data, onViewHistory }: WeeklyUsageChartProps) {
   const hasData = data.length > 0;
 
   return (
@@ -39,7 +40,7 @@ export function WeeklyUsageChart({ data }: WeeklyUsageChartProps) {
           {hasData && (
             <div className="flex items-center gap-1.5">
               <div className="w-2 h-2 rounded-full" style={{ background: 'var(--purple)' }} />
-              <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>Hours</span>
+              <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>Quota used (%)</span>
             </div>
           )}
         </div>
@@ -74,6 +75,8 @@ export function WeeklyUsageChart({ data }: WeeklyUsageChartProps) {
                 tickLine={false}
                 axisLine={false}
                 width={40}
+                domain={[0, 100]}
+                tickFormatter={(value) => `${value}%`}
               />
               <Tooltip
                 contentStyle={{
@@ -92,7 +95,7 @@ export function WeeklyUsageChart({ data }: WeeklyUsageChartProps) {
                 strokeWidth={2}
                 fillOpacity={1}
                 fill="url(#usageGradient)"
-                dot={{ r: 3, fill: 'var(--purple)', strokeWidth: 0 }}
+                dot={false}
                 activeDot={{ r: 5, fill: 'var(--purple-bright)', strokeWidth: 2, stroke: 'var(--bg-card)' }}
               />
             </AreaChart>
@@ -112,15 +115,17 @@ export function WeeklyUsageChart({ data }: WeeklyUsageChartProps) {
         </div>
       )}
 
-      {/* Footer link */}
-      <button
-        className="flex items-center gap-1 text-[12px] font-medium mt-3 self-start transition-colors duration-150"
-        style={{ color: 'var(--text-muted)' }}
-        onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--text-primary)'; }}
-        onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted)'; }}
-      >
-        View full history <ChevronRight size={12} />
-      </button>
+      {onViewHistory && (
+        <button
+          className="flex items-center gap-1 text-[12px] font-medium mt-3 self-start transition-colors duration-150 cursor-pointer"
+          style={{ color: 'var(--text-muted)' }}
+          onClick={onViewHistory}
+          onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--text-primary)'; }}
+          onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted)'; }}
+        >
+          View full history <ChevronRight size={12} />
+        </button>
+      )}
     </div>
   );
 }

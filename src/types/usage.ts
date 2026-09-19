@@ -15,6 +15,9 @@ export interface UsageSnapshot {
   rateLimitReachedType: string | null;
   credits: { balance: string; hasCredits: boolean; unlimited: boolean } | null;
   windows: UsageWindow[];
+  latestContextWindow: number | null;
+  latestContextLoadPercent: number | null;
+  latestLastRequestTokens: TokenBreakdown | null;
 }
 
 export type MonitorState =
@@ -59,6 +62,24 @@ export interface TokenTotals {
   allTimeRecorded: TokenBreakdown;
 }
 
+export interface AccountUsageSummary {
+  lifetimeTokens: number | null;
+  peakDailyTokens: number | null;
+  longestRunningTurnSec: number | null;
+  currentStreakDays: number | null;
+  longestStreakDays: number | null;
+}
+
+export interface DailyUsageBucket {
+  startDate: string;
+  tokens: number;
+}
+
+export interface AccountUsage {
+  summary: AccountUsageSummary | null;
+  dailyUsageBuckets: DailyUsageBucket[] | null;
+}
+
 export interface QuotaSampleRow {
   capturedAt: number; // Unix timestamp
   windowKind: string;
@@ -79,4 +100,67 @@ export interface AppEvent {
   label: string;
   timestamp: string;
   description?: string;
+}
+
+export interface DetailedTokenUsage {
+  inputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteInputTokens: number;
+  uncachedInputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+}
+
+export interface ChatRequestUsage {
+  timestamp: string | null;
+  model: string | null;
+  reasoningEffort: string | null;
+  usage: DetailedTokenUsage;
+  cacheRate: number;
+  estimatedCostUsd: number | null;
+}
+
+export interface ChatSessionSummary {
+  id: string;
+  title: string;
+  cwd: string | null;
+  originator: string | null;
+  source: string | null;
+  model: string | null;
+  reasoningEffort: string | null;
+  createdAt: string | null;
+  updatedAt: number;
+  usage: DetailedTokenUsage;
+  cacheRate: number;
+  estimatedCostUsd: number | null;
+  latestRequest: ChatRequestUsage | null;
+  turnCount: number;
+  requestCount: number;
+  isCurrent: boolean;
+}
+
+export interface ChatMessage {
+  id: string | null;
+  role: 'user' | 'assistant' | string;
+  text: string;
+  timestamp: string | null;
+}
+
+export interface ChatTurnDetail {
+  id: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  model: string | null;
+  reasoningEffort: string | null;
+  messages: ChatMessage[];
+  usage: DetailedTokenUsage;
+  cacheRate: number;
+  estimatedCostUsd: number | null;
+  requests: ChatRequestUsage[];
+}
+
+export interface ChatSessionDetail {
+  summary: ChatSessionSummary;
+  turns: ChatTurnDetail[];
 }

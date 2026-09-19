@@ -3,21 +3,21 @@ mod commands;
 mod db;
 mod local_server;
 mod process_detector;
+mod session_history;
+mod session_log_watcher;
 mod usage_service;
 
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, Listener,
-    WindowEvent,
+    Emitter, Listener, Manager, WindowEvent,
 };
 
 use usage_service::UsageService;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
@@ -32,8 +32,7 @@ pub fn run() {
             // Create a dedicated Tokio runtime for all async work.
             // Tauri 2 does not provide an ambient Tokio runtime in setup,
             // so we must create our own and keep it alive for the process lifetime.
-            let rt = tokio::runtime::Runtime::new()
-                .expect("failed to create Tokio runtime");
+            let rt = tokio::runtime::Runtime::new().expect("failed to create Tokio runtime");
             // Leak a 'static reference so spawned tasks live for the process lifetime
             let rt: &'static tokio::runtime::Runtime = Box::leak(Box::new(rt));
 
@@ -210,6 +209,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_usage,
+            commands::get_account_usage,
             commands::get_token_totals,
             commands::get_monitor_state,
             commands::refresh_usage,
@@ -218,6 +218,9 @@ pub fn run() {
             commands::get_quota_history,
             commands::get_recent_events,
             commands::get_usage_deltas,
+            commands::get_chat_sessions,
+            commands::get_chat_session_detail,
+            commands::get_current_chat_summary,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

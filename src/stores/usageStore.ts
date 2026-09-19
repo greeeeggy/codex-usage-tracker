@@ -1,12 +1,28 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, Event } from '@tauri-apps/api/event';
-import { MonitorState, MonitorStateResponse, UsageSnapshot, UsageWindow, TokenTotals, QuotaSampleRow, UsageDeltas, AppEvent } from '../types/usage';
+import {
+  AccountUsage,
+  AppEvent,
+  ChatSessionSummary,
+  MonitorState,
+  MonitorStateResponse,
+  QuotaSampleRow,
+  TokenTotals,
+  UsageDeltas,
+  UsageSnapshot,
+  UsageWindow,
+} from '../types/usage';
+
+let isInitialized = false;
+let initInFlight: Promise<void> | null = null;
 
 export type AppPage = 'overview' | 'usage' | 'history' | 'limits' | 'sessions' | 'insights' | 'settings';
 
 interface UsageState {
   snapshot: UsageSnapshot | null;
+  accountUsage: AccountUsage | null;
+  currentChat: ChatSessionSummary | null;
   tokenTotals: TokenTotals | null;
   quotaHistory: QuotaSampleRow[];
   usageDeltas: UsageDeltas | null;
@@ -32,6 +48,8 @@ interface UsageState {
 
 export const useUsageStore = create<UsageState>((set, get) => ({
   snapshot: null,
+  accountUsage: null,
+  currentChat: null,
   tokenTotals: null,
   quotaHistory: [],
   usageDeltas: null,
@@ -55,64 +73,99 @@ export const useUsageStore = create<UsageState>((set, get) => ({
   },
 
   init: async () => {
-    try {
-      // Get initial state
-      const stateResponse = await invoke<MonitorStateResponse>('get_monitor_state');
-      set({
-        monitorState: stateResponse.state,
-        errorMessage: stateResponse.errorMessage,
-        detectedClients: stateResponse.detectedClients,
-      });
+    if (initInFlight) return initInFlight;
 
-      const snapshot = await invoke<UsageSnapshot | null>('get_usage');
-      if (snapshot) {
-        set({ snapshot });
-      }
+    initInFlight = (async () => {
+      try {
+        // Always rehydrate current state. The dashboard webview starts hidden and
+        // can mount before the monitor has received its first snapshot.
+        const stateResponse = await invoke<MonitorStateResponse>('get_monitor_state');
+        set({
+          monitorState: stateResponse.state,
+          errorMessage: stateResponse.errorMessage,
+          detectedClients: stateResponse.detectedClients,
+        });
 
-      const tokenTotals = await invoke<TokenTotals | null>('get_token_totals').catch(() => null);
-      if (tokenTotals) {
-        set({ tokenTotals });
-      }
-
-      // Load initial history and events
-      const loadExtras = async () => {
-        try {
-          const quotaHistory = await invoke<QuotaSampleRow[]>('get_quota_history', { windowKind: 'weekly', sinceHours: 168 });
-          const recentEvents = await invoke<AppEvent[]>('get_recent_events');
-          const usageDeltas = await invoke<UsageDeltas>('get_usage_deltas');
-          set({ quotaHistory, recentEvents, usageDeltas });
-        } catch (e) {
-          console.error('Failed to load extra data:', e);
+        const snapshot = await invoke<UsageSnapshot | null>('get_usage');
+        if (snapshot) {
+          set({ snapshot });
         }
-      };
-      await loadExtras();
 
-      // Listen for updates
-      await listen('usage-updated', (event: Event<UsageSnapshot>) => {
-        console.log('Usage updated:', event.payload);
-        set({ snapshot: event.payload });
-        loadExtras(); // Refresh derived metrics on usage update
-      });
+        const accountUsage = await invoke<AccountUsage | null>('get_account_usage').catch(() => null);
+        if (accountUsage) {
+          set({ accountUsage });
+        }
 
-      await listen('token-totals-updated', (event: Event<TokenTotals>) => {
-        console.log('Token totals updated:', event.payload);
-        set({ tokenTotals: event.payload });
-      });
+        const tokenTotals = await invoke<TokenTotals | null>('get_token_totals').catch(() => null);
+        if (tokenTotals) {
+          set({ tokenTotals });
+        }
 
-      await listen('state-changed', (event: Event<MonitorState>) => {
-        console.log('State changed:', event.payload);
-        // Also fetch the full state response to get error messages if any
-        invoke<MonitorStateResponse>('get_monitor_state').then((res) => {
-          set({
-            monitorState: res.state,
-            errorMessage: res.errorMessage,
-            detectedClients: res.detectedClients,
+        const loadCurrentChat = async () => {
+          const currentChat = await invoke<ChatSessionSummary | null>('get_current_chat_summary')
+            .catch(() => null);
+          if (currentChat) {
+            set({ currentChat });
+          }
+        };
+        await loadCurrentChat();
+
+        const loadExtras = async () => {
+          try {
+            const quotaHistory = await invoke<QuotaSampleRow[]>('get_quota_history', { windowKind: 'weekly', sinceHours: 168 });
+            const recentEvents = await invoke<AppEvent[]>('get_recent_events');
+            const usageDeltas = await invoke<UsageDeltas>('get_usage_deltas');
+            set({ quotaHistory, recentEvents, usageDeltas });
+          } catch (e) {
+            console.error('Failed to load extra data:', e);
+          }
+        };
+        await loadExtras();
+
+        if (isInitialized) return;
+
+        // Register listeners only once per webview.
+        await listen('usage-updated', (event: Event<UsageSnapshot>) => {
+          console.log('Usage updated:', event.payload);
+          set({ snapshot: event.payload });
+          loadExtras(); // Refresh derived metrics on usage update
+        });
+
+        await listen('token-totals-updated', (event: Event<TokenTotals>) => {
+          console.log('Token totals updated:', event.payload);
+          set({ tokenTotals: event.payload });
+          void loadCurrentChat();
+        });
+
+        await listen('account-usage-updated', (event: Event<AccountUsage>) => {
+          console.log('Account usage updated:', event.payload);
+          set({ accountUsage: event.payload });
+        });
+
+        await listen('state-changed', (event: Event<MonitorState>) => {
+          console.log('State changed:', event.payload);
+          // Also fetch the full state response to get error messages if any
+          invoke<MonitorStateResponse>('get_monitor_state').then((res) => {
+            set({
+              monitorState: res.state,
+              errorMessage: res.errorMessage,
+              detectedClients: res.detectedClients,
+            });
           });
         });
-      });
+      } catch (err) {
+        console.error('Failed to initialize store:', err);
+        throw err;
+      }
+    })();
 
-    } catch (err) {
-      console.error('Failed to initialize store:', err);
+    try {
+      await initInFlight;
+      isInitialized = true;
+    } catch {
+      // The error was logged above. A later call may retry initialization.
+    } finally {
+      initInFlight = null;
     }
   },
 

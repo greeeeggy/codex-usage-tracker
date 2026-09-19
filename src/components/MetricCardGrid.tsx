@@ -1,7 +1,7 @@
 import { MetricCard } from './MetricCard';
 import { Clock, MonitorDot, Zap, Timer } from 'lucide-react';
 import { TokenTotals, UsageDeltas } from '../types/usage';
-import { formatTokensAsDuration, formatNumber } from '../utils/cn';
+import { formatNumber } from '../utils/cn';
 
 interface MetricCardGridProps {
   tokenTotals: TokenTotals | null;

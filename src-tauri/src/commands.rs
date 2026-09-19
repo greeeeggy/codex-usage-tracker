@@ -14,6 +14,15 @@ pub async fn get_usage(
     Ok(s.snapshot.clone())
 }
 
+/// Tauri command: Get authoritative account-level token activity
+#[tauri::command]
+pub async fn get_account_usage(
+    state: tauri::State<'_, Arc<RwLock<UsageState>>>,
+) -> Result<Option<crate::codex_client::AccountUsage>, String> {
+    let s = state.read().await;
+    Ok(s.account_usage.clone())
+}
+
 /// Tauri command: Get current token totals
 #[tauri::command]
 pub async fn get_token_totals(
@@ -82,6 +91,36 @@ pub async fn get_usage_deltas(
     db.get_usage_deltas("weekly", s.session_start_ts)
 }
 
+/// Tauri command: List locally stored Codex chats with token and cost summaries.
+#[tauri::command]
+pub async fn get_chat_sessions() -> Result<Vec<crate::session_history::ChatSessionSummary>, String>
+{
+    tauri::async_runtime::spawn_blocking(crate::session_history::list_chat_sessions)
+        .await
+        .map_err(|error| format!("Session history task failed: {error}"))?
+}
+
+/// Tauri command: Read messages and per-request usage for one locally stored chat.
+#[tauri::command]
+pub async fn get_chat_session_detail(
+    session_id: String,
+) -> Result<crate::session_history::ChatSessionDetail, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::session_history::read_chat_session(&session_id)
+    })
+    .await
+    .map_err(|error| format!("Session detail task failed: {error}"))?
+}
+
+/// Tauri command: Read the most recently active Codex chat.
+#[tauri::command]
+pub async fn get_current_chat_summary(
+) -> Result<Option<crate::session_history::ChatSessionSummary>, String> {
+    tauri::async_runtime::spawn_blocking(crate::session_history::current_chat_summary)
+        .await
+        .map_err(|error| format!("Current chat task failed: {error}"))?
+}
+
 /// Tauri command: Toggle the overlay widget visibility
 #[tauri::command]
 pub async fn toggle_widget(app: tauri::AppHandle) -> Result<(), String> {
@@ -124,4 +163,3 @@ pub struct DetectedClientInfo {
     pub client_type: String,
     pub name: String,
 }
-

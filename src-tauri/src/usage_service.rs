@@ -8,9 +8,10 @@ use tokio::sync::{mpsc, RwLock};
 use tokio::time::{Duration, Instant};
 
 /// Monitor state machine states
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum MonitorState {
+    #[default]
     Dormant,
     Connecting,
     Monitoring,
@@ -20,7 +21,7 @@ pub enum MonitorState {
 }
 
 /// Alert state for notification thresholds — resets each time Codex is reopened
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct AlertState {
     window_name: String,
     alerted_75: bool,
@@ -29,22 +30,11 @@ struct AlertState {
     alerted_0: bool,
 }
 
-impl Default for AlertState {
-    fn default() -> Self {
-        Self {
-            window_name: String::new(),
-            alerted_75: false,
-            alerted_50: false,
-            alerted_25: false,
-            alerted_0: false,
-        }
-    }
-}
-
 /// Shared usage state accessible from Tauri commands
 #[derive(Debug, Clone, Default)]
 pub struct UsageState {
     pub snapshot: Option<UsageSnapshot>,
+    pub account_usage: Option<crate::codex_client::AccountUsage>,
     pub monitor_state: MonitorState,
     pub error_message: Option<String>,
     pub detected_clients: Vec<process_detector::DetectedClient>,
@@ -52,12 +42,6 @@ pub struct UsageState {
     pub usage_deltas: crate::db::UsageDeltas,
     /// Timestamp when the current monitoring session started (for delta calculations)
     pub session_start_ts: i64,
-}
-
-impl Default for MonitorState {
-    fn default() -> Self {
-        MonitorState::Dormant
-    }
 }
 
 /// The main usage service that manages the monitoring lifecycle
@@ -70,8 +54,25 @@ pub struct UsageService {
 impl UsageService {
     pub fn new(app_handle: tauri::AppHandle) -> Self {
         let db = Arc::new(crate::db::Db::new(&app_handle).expect("Failed to init DB"));
+        let now = chrono::Utc::now().timestamp();
+        let token_totals = db
+            .get_token_totals(
+                "default",
+                now,
+                now - 5 * 3600,
+                now,
+                now - 7 * 24 * 3600,
+                now,
+            )
+            .unwrap_or_default();
+        let initial_state = UsageState {
+            token_totals,
+            session_start_ts: now,
+            ..UsageState::default()
+        };
+
         Self {
-            state: Arc::new(RwLock::new(UsageState::default())),
+            state: Arc::new(RwLock::new(initial_state)),
             app_handle,
             db,
         }
@@ -98,6 +99,10 @@ impl UsageService {
         let mut client: Option<CodexClient> = None;
         let mut refresh_interval = tokio::time::interval(Duration::from_secs(30));
         let mut process_check_interval = tokio::time::interval(Duration::from_secs(3));
+        let mut account_usage_interval = tokio::time::interval_at(
+            Instant::now() + Duration::from_secs(300),
+            Duration::from_secs(300),
+        );
         let mut alert_states: Vec<AlertState> = Vec::new();
 
         // Channel for receiving events from the Codex client
@@ -107,6 +112,19 @@ impl UsageService {
         let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<()>();
         app_handle.listen("refresh-requested", move |_| {
             let _ = internal_tx.send(());
+        });
+
+        // Start the session log watcher in the background
+        let db_for_watcher = self.db.clone();
+        let state_for_watcher = self.state.clone();
+        let app_handle_for_watcher = self.app_handle.clone();
+        tokio::spawn(async move {
+            crate::session_log_watcher::run(
+                db_for_watcher,
+                app_handle_for_watcher,
+                state_for_watcher,
+            )
+            .await;
         });
 
         loop {
@@ -208,6 +226,26 @@ impl UsageService {
                                             s.monitor_state = MonitorState::Monitoring;
                                             let _ = app_handle.emit("state-changed", "monitoring");
                                         }
+                                    }
+
+                                    if let Err(e) = refresh_token_totals(
+                                        &db_clone,
+                                        &state,
+                                        &app_handle,
+                                    )
+                                    .await
+                                    {
+                                        log::warn!("Failed to hydrate token totals: {}", e);
+                                    }
+
+                                    if let Err(e) = refresh_account_usage(
+                                        &new_client,
+                                        &state,
+                                        &app_handle,
+                                    )
+                                    .await
+                                    {
+                                        log::warn!("Account token usage is unavailable: {}", e);
                                     }
 
                                     client = Some(new_client);
@@ -317,12 +355,19 @@ impl UsageService {
                                     persist_quota_samples(&db_for_samples, &snapshot);
 
                                     let session_ts = state.read().await.session_start_ts;
-                                    let mut s = state.write().await;
-                                    let snapshot = update_snapshot_state(&mut s, snapshot);
+                                    let snapshot = {
+                                        let mut s = state.write().await;
+                                        let snapshot = update_snapshot_state(&mut s, snapshot);
 
-                                    // Update usage deltas
-                                    if let Ok(deltas) = db_for_samples.get_usage_deltas("weekly", session_ts) {
-                                        s.usage_deltas = deltas;
+                                        // Update usage deltas
+                                        if let Ok(deltas) = db_for_samples.get_usage_deltas("weekly", session_ts) {
+                                            s.usage_deltas = deltas;
+                                        }
+                                        snapshot
+                                    };
+
+                                    if let Err(e) = refresh_token_totals(&db_clone, &state, &app_handle).await {
+                                        log::warn!("Failed to refresh token totals: {}", e);
                                     }
 
                                     let _ = app_handle.emit("usage-updated", &snapshot);
@@ -354,12 +399,19 @@ impl UsageService {
                             );
 
                             let session_ts = state.read().await.session_start_ts;
-                            let mut s = state.write().await;
-                            let snapshot = update_snapshot_state(&mut s, snapshot);
+                            let snapshot = {
+                                let mut s = state.write().await;
+                                let snapshot = update_snapshot_state(&mut s, snapshot);
 
-                            // Update usage deltas
-                            if let Ok(deltas) = db_for_samples.get_usage_deltas("weekly", session_ts) {
-                                s.usage_deltas = deltas;
+                                // Update usage deltas
+                                if let Ok(deltas) = db_for_samples.get_usage_deltas("weekly", session_ts) {
+                                    s.usage_deltas = deltas;
+                                }
+                                snapshot
+                            };
+
+                            if let Err(e) = refresh_token_totals(&db_clone, &state, &app_handle).await {
+                                log::warn!("Failed to refresh token totals: {}", e);
                             }
 
                             let _ = app_handle.emit("usage-updated", &snapshot);
@@ -370,49 +422,10 @@ impl UsageService {
                             log::info!("Received token usage update: {} tokens", token_event.total_tokens);
                             if let Err(e) = db_clone.insert_token_event(&token_event) {
                                 log::error!("Failed to persist token event: {}", e);
-                            } else {
-                                let current_state = state.read().await;
-                                if let Some(snapshot) = &current_state.snapshot {
-                                    let mut five_hour_start = 0;
-                                    let mut five_hour_end = i64::MAX;
-                                    let mut weekly_start = 0;
-                                    let mut weekly_end = i64::MAX;
-
-                                    for w in &snapshot.windows {
-                                        if w.name == "fiveHour" {
-                                            if let Some(resets) = &w.resets_at {
-                                                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(resets) {
-                                                    five_hour_end = dt.timestamp();
-                                                    five_hour_start = five_hour_end - 5 * 3600;
-                                                }
-                                            }
-                                        } else if w.name == "weekly" {
-                                            if let Some(resets) = &w.resets_at {
-                                                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(resets) {
-                                                    weekly_end = dt.timestamp();
-                                                    weekly_start = weekly_end - 7 * 24 * 3600;
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    match db_clone.get_token_totals(
-                                        &token_event.account_key,
-                                        0,
-                                        five_hour_start,
-                                        five_hour_end,
-                                        weekly_start,
-                                        weekly_end,
-                                    ) {
-                                        Ok(totals) => {
-                                            drop(current_state);
-                                            let mut s = state.write().await;
-                                            s.token_totals = totals.clone();
-                                            let _ = app_handle.emit("token-totals-updated", &totals);
-                                        }
-                                        Err(e) => log::error!("Failed to calculate token totals: {}", e),
-                                    }
-                                }
+                            } else if let Err(e) =
+                                refresh_token_totals(&db_clone, &state, &app_handle).await
+                            {
+                                log::error!("Failed to calculate token totals: {}", e);
                             }
                         }
                         // CodexEvent::Error(e) => {
@@ -437,6 +450,17 @@ impl UsageService {
                     }
                 }
 
+                // Account usage changes less frequently than the live rate-limit windows.
+                _ = account_usage_interval.tick() => {
+                    if state.read().await.monitor_state == MonitorState::Monitoring {
+                        if let Some(c) = &client {
+                            if let Err(e) = refresh_account_usage(c, &state, &app_handle).await {
+                                log::warn!("Failed to refresh account token usage: {}", e);
+                            }
+                        }
+                    }
+                }
+
                 // Internal events
                 Some(_) = internal_rx.recv() => {
                     log::info!("Manual refresh requested");
@@ -447,11 +471,18 @@ impl UsageService {
                                     persist_quota_samples(&db_for_samples, &snapshot);
 
                                     let session_ts = state.read().await.session_start_ts;
-                                    let mut s = state.write().await;
-                                    let snapshot = update_snapshot_state(&mut s, snapshot);
+                                    let snapshot = {
+                                        let mut s = state.write().await;
+                                        let snapshot = update_snapshot_state(&mut s, snapshot);
 
-                                    if let Ok(deltas) = db_for_samples.get_usage_deltas("weekly", session_ts) {
-                                        s.usage_deltas = deltas;
+                                        if let Ok(deltas) = db_for_samples.get_usage_deltas("weekly", session_ts) {
+                                            s.usage_deltas = deltas;
+                                        }
+                                        snapshot
+                                    };
+
+                                    if let Err(e) = refresh_token_totals(&db_clone, &state, &app_handle).await {
+                                        log::warn!("Failed to refresh token totals: {}", e);
                                     }
 
                                     let _ = app_handle.emit("usage-updated", &snapshot);
@@ -465,6 +496,10 @@ impl UsageService {
                                         Some(&e),
                                     );
                                 }
+                            }
+
+                            if let Err(e) = refresh_account_usage(c, &state, &app_handle).await {
+                                log::warn!("Failed to refresh account token usage: {}", e);
                             }
                         }
                     }
@@ -496,7 +531,11 @@ fn persist_quota_samples(db: &crate::db::Db, snapshot: &UsageSnapshot) {
             resets_at_ts,
             &window.source,
         ) {
-            log::error!("Failed to persist quota sample for '{}': {}", window.name, e);
+            log::error!(
+                "Failed to persist quota sample for '{}': {}",
+                window.name,
+                e
+            );
         }
     }
 }
@@ -514,9 +553,92 @@ fn update_snapshot_state(s: &mut UsageState, mut new_snapshot: UsageSnapshot) ->
                 }
             }
         }
+        new_snapshot.latest_context_window = existing.latest_context_window;
+        new_snapshot.latest_context_load_percent = existing.latest_context_load_percent;
+        new_snapshot.latest_last_request_tokens = existing.latest_last_request_tokens.clone();
     }
     s.snapshot = Some(new_snapshot.clone());
     new_snapshot
+}
+
+fn token_window_bounds(
+    snapshot: Option<&UsageSnapshot>,
+    window_name: &str,
+    fallback_duration_secs: i64,
+    now: i64,
+) -> (i64, i64) {
+    let window = snapshot.and_then(|snapshot| {
+        snapshot.windows.iter().find(|window| {
+            window.name == window_name
+                || match window_name {
+                    "fiveHour" => window.duration_minutes == Some(300),
+                    "weekly" => window.duration_minutes == Some(10_080),
+                    _ => false,
+                }
+        })
+    });
+
+    if let Some(window) = window {
+        if let Some(reset_at) = window.resets_at.as_deref() {
+            if let Ok(reset) = chrono::DateTime::parse_from_rfc3339(reset_at) {
+                let duration_secs = window
+                    .duration_minutes
+                    .map(|minutes| minutes as i64 * 60)
+                    .unwrap_or(fallback_duration_secs);
+                let end = reset.timestamp();
+                return (end - duration_secs, end);
+            }
+        }
+    }
+
+    (now - fallback_duration_secs, now)
+}
+
+/// Recompute locally recorded token totals using the active quota-window boundaries.
+pub(crate) async fn refresh_token_totals(
+    db: &crate::db::Db,
+    state: &RwLock<UsageState>,
+    app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    let (snapshot, session_start_ts) = {
+        let s = state.read().await;
+        (s.snapshot.clone(), s.session_start_ts)
+    };
+    let now = chrono::Utc::now().timestamp();
+    let (five_hour_start, five_hour_end) =
+        token_window_bounds(snapshot.as_ref(), "fiveHour", 5 * 3600, now);
+    let (weekly_start, weekly_end) =
+        token_window_bounds(snapshot.as_ref(), "weekly", 7 * 24 * 3600, now);
+
+    let totals = db.get_token_totals(
+        "default",
+        session_start_ts,
+        five_hour_start,
+        five_hour_end,
+        weekly_start,
+        weekly_end,
+    )?;
+
+    {
+        let mut s = state.write().await;
+        s.token_totals = totals.clone();
+    }
+    let _ = app_handle.emit("token-totals-updated", &totals);
+    Ok(())
+}
+
+async fn refresh_account_usage(
+    client: &CodexClient,
+    state: &RwLock<UsageState>,
+    app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    let usage = client.read_account_usage().await?;
+    {
+        let mut s = state.write().await;
+        s.account_usage = Some(usage.clone());
+    }
+    let _ = app_handle.emit("account-usage-updated", &usage);
+    Ok(())
 }
 
 /// Check and fire desktop notifications at threshold percentages.
@@ -599,3 +721,50 @@ fn send_notification(app_handle: &tauri::AppHandle, title: &str, body: &str) {
         .show();
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codex_client::UsageWindow;
+
+    fn snapshot_with_window(window: UsageWindow) -> UsageSnapshot {
+        UsageSnapshot {
+            captured_at: "2026-08-31T00:00:00Z".to_string(),
+            limit_id: Some("codex".to_string()),
+            limit_name: None,
+            plan_type: Some("plus".to_string()),
+            rate_limit_reached_type: None,
+            credits: None,
+            windows: vec![window],
+            latest_context_window: None,
+            latest_context_load_percent: None,
+            latest_last_request_tokens: None,
+        }
+    }
+
+    #[test]
+    fn derives_token_window_from_reset_and_duration() {
+        let reset = 1_800_000_000;
+        let snapshot = snapshot_with_window(UsageWindow {
+            source: "primary".to_string(),
+            name: "fiveHour".to_string(),
+            duration_minutes: Some(300),
+            used_percent: 12.0,
+            remaining_percent: 88.0,
+            resets_at: chrono::DateTime::from_timestamp(reset, 0).map(|dt| dt.to_rfc3339()),
+        });
+
+        assert_eq!(
+            token_window_bounds(Some(&snapshot), "fiveHour", 5 * 3600, reset - 60),
+            (reset - 5 * 3600, reset)
+        );
+    }
+
+    #[test]
+    fn falls_back_to_a_rolling_window_when_reset_is_missing() {
+        let now = 1_800_000_000;
+        assert_eq!(
+            token_window_bounds(None, "weekly", 7 * 24 * 3600, now),
+            (now - 7 * 24 * 3600, now)
+        );
+    }
+}

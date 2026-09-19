@@ -25,9 +25,18 @@ export const getRemainingColorText = getRemainingColorClass;
 
 /** Format a number with K/M suffixes */
 export function formatNumber(num: number): string {
+  if (num >= 1_000_000_000) return (num / 1_000_000_000).toFixed(1) + 'B';
   if (num >= 1_000_000) return (num / 1_000_000).toFixed(1) + 'M';
   if (num >= 1_000) return (num / 1_000).toFixed(1) + 'K';
   return num.toString();
+}
+
+/** Format an API-equivalent USD estimate without rounding tiny requests to zero. */
+export function formatUsd(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '—';
+  if (value >= 1) return `$${value.toFixed(2)}`;
+  if (value >= 0.01) return `$${value.toFixed(4)}`;
+  return `$${value.toFixed(6)}`;
 }
 
 /** Format a token count as an approximate duration string */
