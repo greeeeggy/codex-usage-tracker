@@ -173,6 +173,9 @@ fn cache_rate(usage: &DetailedTokenUsage) -> f64 {
 }
 
 pub(crate) fn sessions_dir() -> Option<PathBuf> {
+    if let Some(codex_dir) = std::env::var_os("CODEX_HOME").filter(|p| !p.is_empty()) {
+        return Some(PathBuf::from(codex_dir).join("sessions"));
+    }
     if let Ok(user_profile) = std::env::var("USERPROFILE") {
         Some(PathBuf::from(user_profile).join(".codex").join("sessions"))
     } else if let Ok(home) = std::env::var("HOME") {
@@ -375,30 +378,59 @@ fn read_summary_head(path: &Path) -> Result<SummaryHead, String> {
     Ok(result)
 }
 
-fn token_count_from_slice(slice: &str) -> Option<(DetailedTokenUsage, DetailedTokenUsage, String)> {
+struct LatestUsage {
+    total: DetailedTokenUsage,
+    last: DetailedTokenUsage,
+    timestamp: String,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+}
+
+fn token_count_from_slice(slice: &str) -> Option<LatestUsage> {
+    let mut latest = None;
     for line in slice.lines().rev() {
         let line_prefix = prefix(line);
-        if !line_prefix.contains("\"type\":\"event_msg\"")
+        if latest.is_some() && line_prefix.contains("\"type\":\"turn_context\"") {
+            let Ok(row) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let payload = &row["payload"];
+            let request: &mut LatestUsage = latest.as_mut().unwrap();
+            request.model = payload
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            request.reasoning_effort = payload
+                .pointer("/collaboration_mode/settings/reasoning_effort")
+                .or_else(|| payload.get("effort"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            return latest.take();
+        }
+        if latest.is_some()
+            || !line_prefix.contains("\"type\":\"event_msg\"")
             || !line_prefix.contains("\"type\":\"token_count\"")
         {
             continue;
         }
-        let row = serde_json::from_str::<Value>(line).ok()?;
-        let payload = row.get("payload")?;
-        let (total, last) = parse_usage_info(payload)?;
-        let timestamp = row
-            .get("timestamp")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        return Some((total, last, timestamp));
+        let Ok(row) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some((total, last)) = parse_usage_info(&row["payload"]) else {
+            continue;
+        };
+        latest = Some(LatestUsage {
+            total,
+            last,
+            timestamp: row["timestamp"].as_str().unwrap_or_default().into(),
+            model: None,
+            reasoning_effort: None,
+        });
     }
-    None
+    latest
 }
 
-fn read_latest_token_count(
-    path: &Path,
-) -> Result<Option<(DetailedTokenUsage, DetailedTokenUsage, String)>, String> {
+fn read_latest_token_count(path: &Path) -> Result<Option<LatestUsage>, String> {
     let mut file = File::open(path).map_err(|error| format!("Open session failed: {error}"))?;
     let len = file
         .metadata()
@@ -407,7 +439,6 @@ fn read_latest_token_count(
     if len == 0 {
         return Ok(None);
     }
-
     let mut span = SUMMARY_TAIL_INITIAL_BYTES.min(len);
     loop {
         file.seek(SeekFrom::Start(len - span))
@@ -421,11 +452,36 @@ fn read_latest_token_count(
         } else {
             text.as_ref()
         };
-        if let Some(result) = token_count_from_slice(complete_text) {
-            return Ok(Some(result));
+        let result = token_count_from_slice(complete_text);
+        if result.as_ref().is_some_and(|r| r.model.is_some()) || span == len {
+            return Ok(result);
         }
-        if span == len || span >= SUMMARY_TAIL_MAX_BYTES {
-            return Ok(None);
+        if span >= SUMMARY_TAIL_MAX_BYTES {
+            // Large tool output may push the latest turn context outside the
+            // tail. Stream the file instead of reusing its first model.
+            file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+            let mut model = None;
+            let mut effort = None;
+            let mut found = None;
+            for line in BufReader::new(file).lines() {
+                let line = line.map_err(|e| e.to_string())?;
+                let p = prefix(&line);
+                if p.contains("\"type\":\"turn_context\"") {
+                    if let Ok(row) = serde_json::from_str::<Value>(&line) {
+                        model = row["payload"]["model"].as_str().map(str::to_owned);
+                        effort = row["payload"]
+                            .pointer("/collaboration_mode/settings/reasoning_effort")
+                            .or_else(|| row["payload"].get("effort"))
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                    }
+                } else if let Some(mut usage) = token_count_from_slice(&line) {
+                    usage.model = model.clone();
+                    usage.reasoning_effort = effort.clone();
+                    found = Some(usage);
+                }
+            }
+            return Ok(found);
         }
         span = (span * 2).min(len).min(SUMMARY_TAIL_MAX_BYTES);
     }
@@ -464,14 +520,26 @@ fn fallback_title(head: &SummaryHead, id: &str) -> String {
 }
 
 fn summarize_file(path: &Path) -> Result<ChatSessionSummary, String> {
-    let head = read_summary_head(path)?;
+    let mut head = read_summary_head(path)?;
     let id = head.id.clone().unwrap_or_else(|| fallback_id(path));
     let title = head
         .title
         .clone()
         .unwrap_or_else(|| fallback_title(&head, &id));
     let latest = read_latest_token_count(path)?;
-    let (usage, latest_request) = if let Some((total, last, timestamp)) = latest {
+    let (usage, latest_request) = if let Some(latest) = latest {
+        if latest.model.is_some() {
+            head.model = latest.model;
+        }
+        if latest.reasoning_effort.is_some() {
+            head.reasoning_effort = latest.reasoning_effort;
+        }
+        let LatestUsage {
+            total,
+            last,
+            timestamp,
+            ..
+        } = latest;
         let latest_request = ChatRequestUsage {
             timestamp: (!timestamp.is_empty()).then_some(timestamp),
             model: head.model.clone(),
@@ -847,8 +915,10 @@ pub fn read_chat_session(id: &str) -> Result<ChatSessionDetail, String> {
     summary.cache_rate = cache_rate(&summary.usage);
     summary.estimated_cost_usd = if request_count > 0 && all_requests_priced {
         Some(exact_cost)
-    } else {
+    } else if request_count == 0 {
         aggregate_cost_estimate
+    } else {
+        None
     };
     summary.latest_request = turns
         .iter()
@@ -910,5 +980,24 @@ mod tests {
         });
         assert!(!is_real_user_message(&instructions, "hidden context"));
         assert!(is_real_user_message(&user, "show my usage"));
+    }
+}
+
+#[cfg(test)]
+mod current_model_tests {
+    use super::*;
+    #[test]
+    fn latest_request_uses_its_model_after_a_model_switch() {
+        let text = concat!(
+            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"old-model\"}}\n",
+            "{\"timestamp\":\"2026-10-02T12:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"total_tokens\":100},\"last_token_usage\":{\"total_tokens\":100}}}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"brand-new-model\",\"effort\":\"high\"}}\n",
+            "{\"timestamp\":\"2026-10-02T13:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"total_tokens\":200},\"last_token_usage\":{\"total_tokens\":100}}}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\","
+        );
+        let latest = token_count_from_slice(text).unwrap();
+        assert_eq!(latest.model.as_deref(), Some("brand-new-model"));
+        assert_eq!(latest.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(latest.total.total_tokens, 200);
     }
 }

@@ -150,7 +150,11 @@ fn import_batch(db: &Db, path: &Path) -> Result<Option<LiveContext>, String> {
             let limit_id = payload
                 .pointer("/rate_limits/limit_id")
                 .and_then(Value::as_str)
-                .unwrap_or("unattributed")
+                .unwrap_or(if payload["rate_limits"].is_object() {
+                    "codex"
+                } else {
+                    "unattributed"
+                })
                 .to_string();
             pending.push((
                 TokenEvent {
