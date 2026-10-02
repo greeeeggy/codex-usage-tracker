@@ -54,7 +54,7 @@ test('Limits retains completed windows, token totals, and bucket filters', async
 
 test('Pricing displays new models and responds to a price update', async ({ page }) => {
   await page.goto('/');
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('navigation').getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByText('1 models · View rates per million tokens').click();
   await expect(page.getByRole('cell', { name: 'future-model', exact: true })).toBeVisible();
   await expect(page.getByRole('cell', { name: '$2', exact: true })).toBeVisible();
