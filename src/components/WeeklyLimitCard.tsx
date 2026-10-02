@@ -38,7 +38,9 @@ export function WeeklyLimitCard({ window, compact = false }: WeeklyLimitCardProp
     }
   }
 
-  const limitTitle = window.name === 'fiveHour' ? '5-Hour Limit' : 'Weekly Limit';
+  const limitTitle = window.name === 'fiveHour' ? '5-Hour Limit'
+    : window.name === 'weekly' ? 'Weekly Limit'
+    : window.durationMinutes ? `${window.durationMinutes}-Minute Limit` : 'Usage Limit';
   const valueClass = compact
     ? 'text-xl font-semibold tabular-nums'
     : 'text-2xl font-semibold tabular-nums';

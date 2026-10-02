@@ -8,6 +8,7 @@ import {
   Search,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
+import { useUsageStore } from '../stores/usageStore';
 import {
   ChatSessionDetail,
   ChatSessionSummary,
@@ -233,6 +234,7 @@ function TurnCard({
 }
 
 export function ChatSessionHistory() {
+  const pricingTimestamp = useUsageStore(s => s.pricing?.fetchedAt);
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ChatSessionDetail | null>(null);
@@ -260,7 +262,7 @@ export function ChatSessionHistory() {
 
   useEffect(() => {
     void loadSessions();
-  }, []);
+  }, [pricingTimestamp]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -286,7 +288,7 @@ export function ChatSessionHistory() {
     return () => {
       cancelled = true;
     };
-  }, [selectedId]);
+  }, [selectedId, pricingTimestamp]);
 
   const filteredSessions = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
