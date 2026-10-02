@@ -23,3 +23,7 @@ src-tauri/Cargo.lock
 *.njsproj
 *.sln
 *.sw?
+playwright-report
+test-results
+downloads
+release-download

@@ -33,7 +33,7 @@ pub struct DetailedTokenUsage {
 }
 
 impl DetailedTokenUsage {
-    fn from_value(value: &Value) -> Self {
+    pub(crate) fn from_value(value: &Value) -> Self {
         let input_tokens = value
             .get("input_tokens")
             .and_then(Value::as_i64)
@@ -44,6 +44,7 @@ impl DetailedTokenUsage {
             .unwrap_or(0);
         let cache_write_input_tokens = value
             .get("cache_write_input_tokens")
+            .or_else(|| value.get("cache_write_tokens"))
             .and_then(Value::as_i64)
             .unwrap_or(0);
         let output_tokens = value
@@ -146,83 +147,21 @@ pub struct ChatSessionDetail {
     pub turns: Vec<ChatTurnDetail>,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ModelPricing {
-    input_per_million: f64,
-    cached_input_per_million: f64,
-    output_per_million: f64,
-    cache_write_multiplier: f64,
-    long_context_multiplier: bool,
-}
-
-fn pricing_for_model(model: &str) -> Option<ModelPricing> {
-    let normalized = model.to_ascii_lowercase();
-    let pricing = if normalized.contains("gpt-5.6-sol") {
-        ModelPricing {
-            input_per_million: 4.0,
-            cached_input_per_million: 0.40,
-            output_per_million: 20.0,
-            cache_write_multiplier: 1.25,
-            long_context_multiplier: true,
+pub(crate) fn invalidate_price_cache() {
+    if let Some(cache) = SUMMARY_CACHE.get() {
+        if let Ok(mut entries) = cache.lock() {
+            entries.clear();
         }
-    } else if normalized.contains("gpt-5.6-terra") {
-        ModelPricing {
-            input_per_million: 2.0,
-            cached_input_per_million: 0.20,
-            output_per_million: 12.0,
-            cache_write_multiplier: 1.25,
-            long_context_multiplier: true,
-        }
-    } else if normalized.contains("gpt-5.6-luna") {
-        ModelPricing {
-            input_per_million: 0.20,
-            cached_input_per_million: 0.02,
-            output_per_million: 1.20,
-            cache_write_multiplier: 1.25,
-            long_context_multiplier: true,
-        }
-    } else if normalized.contains("gpt-5.5") {
-        ModelPricing {
-            input_per_million: 5.0,
-            cached_input_per_million: 0.50,
-            output_per_million: 30.0,
-            cache_write_multiplier: 1.25,
-            long_context_multiplier: true,
-        }
-    } else {
-        return None;
-    };
-
-    Some(pricing)
+    }
 }
 
 fn estimate_cost(
     usage: &DetailedTokenUsage,
     model: Option<&str>,
-    apply_per_request_threshold: bool,
+    per_request: bool,
 ) -> Option<f64> {
-    let pricing = pricing_for_model(model?)?;
-    let long_context = apply_per_request_threshold
-        && pricing.long_context_multiplier
-        && usage.input_tokens > 272_000;
-    let input_multiplier = if long_context { 2.0 } else { 1.0 };
-    let output_multiplier = if long_context { 1.5 } else { 1.0 };
-    let million = 1_000_000.0;
-
-    let uncached_cost =
-        usage.uncached_input_tokens as f64 * pricing.input_per_million * input_multiplier / million;
-    let cached_cost =
-        usage.cached_input_tokens as f64 * pricing.cached_input_per_million * input_multiplier
-            / million;
-    let cache_write_cost = usage.cache_write_input_tokens as f64
-        * pricing.input_per_million
-        * pricing.cache_write_multiplier
-        * input_multiplier
-        / million;
-    let output_cost =
-        usage.output_tokens as f64 * pricing.output_per_million * output_multiplier / million;
-
-    Some(uncached_cost + cached_cost + cache_write_cost + output_cost)
+    let prices = crate::pricing::catalog();
+    crate::pricing::estimate(usage, crate::pricing::lookup(&prices, model?)?, per_request)
 }
 
 fn cache_rate(usage: &DetailedTokenUsage) -> f64 {
@@ -939,9 +878,6 @@ mod tests {
         };
 
         assert!((cache_rate(&usage) - 98.046875).abs() < 0.0001);
-        let cost = estimate_cost(&usage, Some("gpt-5.6-sol"), true).unwrap();
-        let expected = (5.0 * 4.0 + 251.0 * 0.4 + 100.0 * 20.0) / 1_000_000.0;
-        assert!((cost - expected).abs() < f64::EPSILON);
     }
 
     #[test]

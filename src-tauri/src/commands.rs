@@ -5,6 +5,41 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use tokio::sync::RwLock;
 
+#[tauri::command]
+pub fn get_pricing() -> crate::pricing::Catalog {
+    crate::pricing::catalog()
+}
+
+#[tauri::command]
+pub async fn refresh_pricing(
+    db: tauri::State<'_, Arc<crate::db::Db>>,
+    app: tauri::AppHandle,
+) -> Result<crate::pricing::Catalog, String> {
+    let result = crate::pricing::refresh(&db, true).await;
+    let _ = app.emit("pricing-updated", crate::pricing::catalog());
+    result
+}
+
+#[tauri::command]
+pub async fn get_limit_history(
+    db: tauri::State<'_, Arc<crate::db::Db>>,
+    limit_id: Option<String>,
+    window_kind: Option<String>,
+    offset: Option<i64>,
+) -> Result<crate::limit_history::LimitHistoryPage, String> {
+    let db = db.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.get_limit_history(
+            limit_id.as_deref(),
+            window_kind.as_deref(),
+            offset.unwrap_or(0),
+            chrono::Utc::now().timestamp(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Tauri command: Get current usage snapshot
 #[tauri::command]
 pub async fn get_usage(

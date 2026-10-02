@@ -7,6 +7,8 @@ import { MetricCardGrid } from '../components/MetricCardGrid';
 import { RecentEventsCard } from '../components/RecentEventsCard';
 import { LimitSummaryCard } from '../components/LimitSummaryCard';
 import { TokenUsageSummary } from '../components/TokenUsageSummary';
+import { LimitPeriodHistory } from '../components/LimitPeriodHistory';
+import { PricingCatalogCard } from '../components/PricingCatalogCard';
 import { ChatSessionHistory } from '../components/ChatSessionHistory';
 import { Activity, RefreshCw, Layers, History as HistoryIcon, Gauge, MonitorDot, Lightbulb, Settings as SettingsIcon, Cpu } from 'lucide-react';
 import { formatNumber, formatUsd } from '../utils/cn';
@@ -51,7 +53,7 @@ export function Dashboard() {
   const currentChatUsage = currentChat?.usage ?? tokenTotals?.currentSession;
 
   // Error / auth required state
-  if (monitorState === 'error' || monitorState === 'authRequired') {
+  if ((monitorState === 'error' || monitorState === 'authRequired') && !['limits', 'history', 'settings'].includes(activePage)) {
     return (
       <div className="h-full p-6">
         <DashboardHeader />
@@ -303,16 +305,13 @@ export function Dashboard() {
             <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
               <Gauge size={20} style={{ color: 'var(--purple)' }} /> Monitored Rate Limits
             </h2>
-
-            <div className="grid grid-cols-1 gap-6">
-              {fiveHourWindow && <WeeklyLimitCard window={fiveHourWindow} />}
-              {weeklyWindow && <WeeklyLimitCard window={weeklyWindow} />}
-              {!fiveHourWindow && !weeklyWindow && (
-                <div className="rounded-2xl p-8 text-center" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-default)' }}>
-                  <span style={{ color: 'var(--text-muted)' }}>No rate limits currently active.</span>
-                </div>
-              )}
-            </div>
+            {(snapshot?.limits ?? []).map(bucket => (
+              <div key={bucket.limitId} className="space-y-3">
+                <h3 className="text-sm font-semibold" style={{ color: 'var(--text-secondary)' }}>{bucket.limitName ?? bucket.limitId}</h3>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">{bucket.windows.map(window => <WeeklyLimitCard key={window.source} window={window} />)}</div>
+              </div>
+            ))}
+            <LimitPeriodHistory />
           </div>
         );
 
@@ -388,6 +387,7 @@ export function Dashboard() {
       case 'settings':
         return (
           <div className="space-y-6">
+            <PricingCatalogCard />
             <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
               <SettingsIcon size={20} style={{ color: 'var(--purple)' }} /> Application Settings
             </h2>

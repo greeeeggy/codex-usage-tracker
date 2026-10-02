@@ -86,6 +86,17 @@ pub struct Db {
 }
 
 impl Db {
+    #[cfg(test)]
+    pub(crate) fn test_db(path: Option<&std::path::Path>) -> Self {
+        let conn = path
+            .map(|p| Connection::open(p).unwrap())
+            .unwrap_or_else(|| Connection::open_in_memory().unwrap());
+        let db = Self {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+        db.initialize_schema().unwrap();
+        db
+    }
     pub fn new(app_handle: &tauri::AppHandle) -> Result<Self, String> {
         let app_dir = app_handle
             .path()
@@ -191,10 +202,263 @@ impl Db {
             CREATE INDEX IF NOT EXISTS idx_quota_samples_captured ON quota_samples(captured_at);
             CREATE INDEX IF NOT EXISTS idx_quota_samples_kind ON quota_samples(window_kind, captured_at);
             CREATE INDEX IF NOT EXISTS idx_app_events_captured ON app_events(captured_at);
+
+            CREATE TABLE IF NOT EXISTS limit_period_history (
+                id INTEGER PRIMARY KEY,
+                account_key TEXT NOT NULL DEFAULT 'default',
+                limit_id TEXT NOT NULL,
+                limit_name TEXT,
+                window_kind TEXT NOT NULL,
+                started_at INTEGER NOT NULL,
+                resets_at INTEGER NOT NULL,
+                first_observed_at INTEGER NOT NULL,
+                last_observed_at INTEGER NOT NULL,
+                used_percent REAL NOT NULL,
+                UNIQUE(account_key, limit_id, window_kind, resets_at)
+            );
+            CREATE TABLE IF NOT EXISTS window_token_events (
+                id TEXT PRIMARY KEY,
+                account_key TEXT NOT NULL,
+                limit_id TEXT NOT NULL,
+                captured_at INTEGER NOT NULL,
+                thread_id TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL,
+                cached_input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                reasoning_tokens INTEGER,
+                total_tokens INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_window_tokens_range ON window_token_events(account_key, limit_id, captured_at);
+            CREATE TABLE IF NOT EXISTS rollout_checkpoints (
+                file_key TEXT PRIMARY KEY,
+                offset INTEGER NOT NULL,
+                state_json TEXT NOT NULL
+            );
+            CREATE VIEW IF NOT EXISTS counted_token_events AS
+                SELECT account_key, captured_at, thread_id, input_tokens, cached_input_tokens,
+                       output_tokens, reasoning_tokens, total_tokens FROM window_token_events
+                UNION ALL
+                SELECT account_key, captured_at, thread_id, input_tokens, cached_input_tokens,
+                       output_tokens, reasoning_tokens, total_tokens FROM token_events AS legacy
+                WHERE legacy.event_type = 'local_rollout' AND NOT EXISTS (
+                    SELECT 1 FROM rollout_checkpoints WHERE file_key = legacy.thread_id
+                );
             "
         ).map_err(|e| format!("Failed to initialize schema: {}", e))?;
 
         Ok(())
+    }
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>, String> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT value_json FROM settings WHERE key = ?1",
+                [key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn set_setting(&self, key: &str, json: &str) -> Result<(), String> {
+        self.conn.lock().unwrap().execute("INSERT INTO settings VALUES (?1, ?2, ?3)
+            ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+            params![key, json, chrono::Utc::now().timestamp()]).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn record_limit_period(
+        &self,
+        limit_id: &str,
+        limit_name: Option<&str>,
+        kind: &str,
+        minutes: u64,
+        reset: i64,
+        captured: i64,
+        used: f64,
+    ) -> Result<(), String> {
+        if minutes == 0 || minutes > 525_600 || reset <= 0 || !used.is_finite() {
+            return Ok(());
+        }
+        let conn = self.conn.lock().unwrap();
+        // Zero-use responses may slide their placeholder reset on every poll.
+        // Reuse an unexpired empty period until real usage supplies its boundary.
+        let placeholder: Option<(i64, i64)> = conn
+            .query_row(
+                "SELECT id, resets_at FROM limit_period_history
+            WHERE account_key = 'default' AND limit_id = ?1 AND window_kind = ?2
+            AND used_percent = 0 AND resets_at > ?3 AND started_at <= ?3
+            AND NOT EXISTS (SELECT 1 FROM window_token_events e WHERE e.limit_id = limit_period_history.limit_id
+                AND e.captured_at >= limit_period_history.started_at AND e.captured_at < limit_period_history.resets_at)
+            ORDER BY last_observed_at DESC LIMIT 1",
+                params![limit_id, kind, captured],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
+        let reset = if used == 0.0 {
+            placeholder.map(|(_, end)| end).unwrap_or(reset)
+        } else {
+            reset
+        };
+        if used > 0.0 {
+            if let Some((id, end)) = placeholder {
+                if end != reset {
+                    conn.execute("DELETE FROM limit_period_history WHERE id = ?1", [id])
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        conn.execute("INSERT INTO limit_period_history
+            (limit_id, limit_name, window_kind, started_at, resets_at, first_observed_at, last_observed_at, used_percent)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)
+            ON CONFLICT(account_key, limit_id, window_kind, resets_at) DO UPDATE SET
+                first_observed_at = MIN(first_observed_at, excluded.first_observed_at),
+                limit_name = COALESCE(excluded.limit_name, limit_name),
+                used_percent = CASE WHEN excluded.last_observed_at >= last_observed_at THEN excluded.used_percent ELSE used_percent END,
+                last_observed_at = MAX(last_observed_at, excluded.last_observed_at)",
+            params![limit_id, limit_name, kind, reset - minutes as i64 * 60, reset, captured, used.clamp(0.0, 100.0)])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn backfill_limit_periods(&self) -> Result<(), String> {
+        if self.get_setting("limit_history_backfilled")?.is_some() {
+            return Ok(());
+        }
+        // Existing quota observations preserve known reset boundaries. Never
+        // manufacture periods in unobserved gaps.
+        let samples: Vec<(i64, String, u64, i64, f64)> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT captured_at, window_kind, duration_minutes, resets_at, used_percent
+                FROM quota_samples WHERE resets_at IS NOT NULL AND duration_minutes > 0 ORDER BY captured_at")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })
+                .map_err(|e| e.to_string())?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?
+        };
+        for (captured, kind, duration, reset, used) in samples {
+            self.record_limit_period("codex", None, &kind, duration, reset, captured, used)?;
+        }
+        self.set_setting("limit_history_backfilled", "true")?;
+        Ok(())
+    }
+
+    pub fn get_limit_history(
+        &self,
+        limit_id: Option<&str>,
+        kind: Option<&str>,
+        offset: i64,
+        now: i64,
+    ) -> Result<crate::limit_history::LimitHistoryPage, String> {
+        let conn = self.conn.lock().unwrap();
+        let total = conn
+            .query_row(
+                "SELECT COUNT(*) FROM limit_period_history WHERE
+            (?1 IS NULL OR limit_id = ?1) AND (?2 IS NULL OR window_kind = ?2)",
+                params![limit_id, kind],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, limit_id, limit_name, window_kind, started_at, resets_at,
+            first_observed_at, last_observed_at, used_percent FROM limit_period_history WHERE
+            (?1 IS NULL OR limit_id = ?1) AND (?2 IS NULL OR window_kind = ?2)
+            ORDER BY resets_at DESC, limit_id, window_kind LIMIT 100 OFFSET ?3",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![limit_id, kind, offset.max(0)], |r| {
+                let start: i64 = r.get(4)?;
+                let reset: i64 = r.get(5)?;
+                Ok(crate::limit_history::LimitPeriod {
+                    id: r.get(0)?,
+                    limit_id: r.get(1)?,
+                    limit_name: r.get(2)?,
+                    window_kind: r.get(3)?,
+                    started_at: start,
+                    resets_at: reset,
+                    first_observed_at: r.get(6)?,
+                    last_observed_at: r.get(7)?,
+                    used_percent: r.get(8)?,
+                    status: if reset <= now { "completed" } else { "active" }.into(),
+                    tokens: TokenBreakdown::default(),
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut periods = rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())?;
+        for period in &mut periods {
+            period.tokens = conn.query_row("SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(cached_input_tokens),0),
+                COALESCE(SUM(output_tokens),0), COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(total_tokens),0)
+                FROM window_token_events WHERE account_key = 'default' AND limit_id = ?1 AND captured_at >= ?2 AND captured_at < ?3",
+                params![period.limit_id, period.started_at, period.resets_at], |r| {
+                    let input: i64 = r.get(0)?;
+                    let cached: i64 = r.get(1)?;
+                    Ok(TokenBreakdown { input_tokens: input, cached_input_tokens: cached, uncached_input_tokens: (input - cached).max(0),
+                        output_tokens: r.get(2)?, reasoning_tokens: Some(r.get(3)?), total_tokens: r.get(4)? })
+                }).map_err(|e| e.to_string())?;
+        }
+        Ok(crate::limit_history::LimitHistoryPage { periods, total })
+    }
+
+    pub fn get_rollout_checkpoint(&self, key: &str) -> Result<Option<(u64, String)>, String> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT offset, state_json FROM rollout_checkpoints WHERE file_key = ?1",
+                [key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn save_rollout_batch(
+        &self,
+        key: &str,
+        offset: u64,
+        state_json: &str,
+        events: &[(TokenEvent, String)],
+    ) -> Result<(), String> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        for (event, limit_id) in events {
+            tx.execute(
+                "INSERT INTO window_token_events VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                ON CONFLICT(id) DO NOTHING",
+                params![
+                    event.id,
+                    event.account_key,
+                    limit_id,
+                    event.captured_at,
+                    event.thread_id,
+                    event.input_tokens,
+                    event.cached_input_tokens,
+                    event.output_tokens,
+                    event.reasoning_tokens,
+                    event.total_tokens
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.execute(
+            "INSERT INTO rollout_checkpoints VALUES (?1, ?2, ?3) ON CONFLICT(file_key)
+            DO UPDATE SET offset = excluded.offset, state_json = excluded.state_json",
+            params![key, offset as i64, state_json],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
     }
 
     // ── Quota Samples ──────────────────────────────────────────────────
@@ -484,8 +748,8 @@ impl Db {
                 COALESCE(SUM(output_tokens), 0),
                 COALESCE(SUM(reasoning_tokens), 0),
                 COALESCE(SUM(total_tokens), 0)
-             FROM token_events
-             WHERE account_key = ?1 AND captured_at >= ?2 AND captured_at <= ?3",
+             FROM counted_token_events
+             WHERE account_key = ?1 AND captured_at >= ?2 AND captured_at < ?3",
             )
             .map_err(|e| format!("Prepare query failed: {}", e))?;
 
@@ -520,7 +784,7 @@ impl Db {
             let mut stmt = conn
                 .prepare(
                     "SELECT thread_id
-                     FROM token_events
+                     FROM counted_token_events
                      WHERE account_key = ?1
                        AND thread_id IS NOT NULL
                        AND event_type = 'local_rollout'
@@ -548,7 +812,7 @@ impl Db {
                     COALESCE(SUM(output_tokens), 0),
                     COALESCE(SUM(reasoning_tokens), 0),
                     COALESCE(SUM(total_tokens), 0)
-                 FROM token_events
+                 FROM counted_token_events
                  WHERE account_key = ?1 AND thread_id = ?2",
             )
             .map_err(|e| format!("Prepare current chat query failed: {}", e))?;
@@ -635,7 +899,7 @@ impl Db {
                 COALESCE(SUM(output_tokens), 0),
                 COALESCE(SUM(reasoning_tokens), 0),
                 COALESCE(SUM(total_tokens), 0)
-             FROM token_events
+             FROM counted_token_events
              WHERE thread_id = ?1",
             )
             .map_err(|e| format!("Prepare query failed: {}", e))?;
@@ -661,5 +925,234 @@ impl Db {
         }
 
         Ok(TokenBreakdown::default())
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    fn event(id: &str, timestamp: i64, total: i64) -> TokenEvent {
+        TokenEvent {
+            id: id.into(),
+            account_key: "default".into(),
+            captured_at: timestamp,
+            client_type: "local_session".into(),
+            thread_id: Some("test-rollout".into()),
+            turn_id: None,
+            project_path_hash: None,
+            model: None,
+            input_tokens: total - 10,
+            cached_input_tokens: 20,
+            output_tokens: 10,
+            reasoning_tokens: Some(5),
+            total_tokens: total,
+            event_type: "local_rollout".into(),
+        }
+    }
+
+    #[test]
+    fn archives_five_hour_periods_and_assigns_boundary_to_new_period() {
+        let db = Db::test_db(None);
+        let reset = 1_800_000_000;
+        db.record_limit_period("codex", None, "fiveHour", 300, reset, reset - 60, 80.0)
+            .unwrap();
+        db.record_limit_period(
+            "codex",
+            None,
+            "fiveHour",
+            300,
+            reset + 18_000,
+            reset + 60,
+            5.0,
+        )
+        .unwrap();
+        db.save_rollout_batch(
+            "test-rollout",
+            1,
+            "{}",
+            &[
+                (event("one", reset - 1, 100), "codex".into()),
+                (event("two", reset, 50), "codex".into()),
+            ],
+        )
+        .unwrap();
+        let page = db
+            .get_limit_history(None, Some("fiveHour"), 0, reset + 60)
+            .unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.periods[0].tokens.total_tokens, 50);
+        assert_eq!(page.periods[1].tokens.total_tokens, 100);
+        assert_eq!(page.periods[1].status, "completed");
+        assert_eq!(page.periods[0].status, "active");
+    }
+
+    #[test]
+    fn weekly_reset_and_multiple_buckets_remain_independent() {
+        let db = Db::test_db(None);
+        let reset = 1_800_000_000;
+        for bucket in ["codex", "other-model-limit"] {
+            db.record_limit_period(bucket, None, "weekly", 10080, reset, reset - 10, 50.0)
+                .unwrap();
+            db.record_limit_period(
+                bucket,
+                None,
+                "weekly",
+                10080,
+                reset + 604800,
+                reset + 10,
+                1.0,
+            )
+            .unwrap();
+        }
+        db.save_rollout_batch(
+            "test-rollout",
+            1,
+            "{}",
+            &[
+                (event("one", reset - 1, 100), "codex".into()),
+                (event("two", reset - 1, 50), "other-model-limit".into()),
+                (event("three", reset, 70), "codex".into()),
+            ],
+        )
+        .unwrap();
+        let codex = db
+            .get_limit_history(Some("codex"), Some("weekly"), 0, reset + 1)
+            .unwrap();
+        assert_eq!(codex.total, 2);
+        assert_eq!(codex.periods[0].tokens.total_tokens, 70);
+        assert_eq!(codex.periods[1].tokens.total_tokens, 100);
+        let other = db
+            .get_limit_history(Some("other-model-limit"), None, 0, reset + 1)
+            .unwrap();
+        assert_eq!(other.periods[1].tokens.total_tokens, 50);
+    }
+
+    #[test]
+    fn stale_replay_does_not_replace_last_quota_observation() {
+        let db = Db::test_db(None);
+        let reset = 1_800_000_000;
+        db.record_limit_period("codex", None, "weekly", 10080, reset, reset - 5, 80.0)
+            .unwrap();
+        db.record_limit_period("codex", None, "weekly", 10080, reset, reset - 60, 20.0)
+            .unwrap();
+        let page = db.get_limit_history(None, None, 0, reset).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.periods[0].used_percent, 80.0);
+        assert_eq!(page.periods[0].first_observed_at, reset - 60);
+    }
+
+    #[test]
+    fn restart_keeps_history_and_replay_does_not_double_count() {
+        let path = std::env::temp_dir().join(format!("meter-test-{}.db", uuid::Uuid::new_v4()));
+        let reset = 1_800_000_000;
+        let rows = vec![(event("one", reset - 1, 100), "codex".into())];
+        {
+            let db = Db::test_db(Some(&path));
+            db.record_limit_period("codex", None, "fiveHour", 300, reset, reset - 10, 30.0)
+                .unwrap();
+            db.save_rollout_batch("test-rollout", 500, "{}", &rows)
+                .unwrap();
+        }
+        {
+            let db = Db::test_db(Some(&path));
+            db.save_rollout_batch("test-rollout", 500, "{}", &rows)
+                .unwrap();
+            assert_eq!(
+                db.get_rollout_checkpoint("test-rollout")
+                    .unwrap()
+                    .unwrap()
+                    .0,
+                500
+            );
+            let page = db.get_limit_history(None, None, 0, reset + 1).unwrap();
+            assert_eq!(page.periods[0].tokens.total_tokens, 100);
+            assert_eq!(page.periods[0].status, "completed");
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn old_schema_samples_backfill_without_duplicate_periods() {
+        let db = Db::test_db(None);
+        db.insert_quota_sample(
+            "default",
+            1_799_999_000,
+            "fiveHour",
+            Some(300),
+            20.0,
+            80.0,
+            Some(1_800_000_000),
+            "primary",
+        )
+        .unwrap();
+        db.backfill_limit_periods().unwrap();
+        db.backfill_limit_periods().unwrap();
+        assert_eq!(
+            db.get_limit_history(None, None, 0, 1_800_000_001)
+                .unwrap()
+                .total,
+            1
+        );
+    }
+
+    #[test]
+    fn zero_usage_placeholder_does_not_create_a_period_per_poll() {
+        let db = Db::test_db(None);
+        let reset = 1_800_000_000;
+        db.record_limit_period("codex", None, "fiveHour", 300, reset, reset - 60, 0.0)
+            .unwrap();
+        db.record_limit_period("codex", None, "fiveHour", 300, reset + 30, reset - 30, 0.0)
+            .unwrap();
+        assert_eq!(
+            db.get_limit_history(None, None, 0, reset - 30)
+                .unwrap()
+                .total,
+            1
+        );
+        db.record_limit_period(
+            "codex",
+            None,
+            "fiveHour",
+            300,
+            reset + 18_000,
+            reset + 1,
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(
+            db.get_limit_history(None, None, 0, reset + 1)
+                .unwrap()
+                .total,
+            2
+        );
+    }
+
+    #[test]
+    fn older_rollout_totals_are_preserved_until_their_file_is_replayed() {
+        let db = Db::test_db(None);
+        let legacy = event("old", 1_799_999_000, 100);
+        db.insert_token_event(&legacy).unwrap();
+        assert_eq!(
+            db.get_token_totals("default", 0, 0, i64::MAX, 0, i64::MAX)
+                .unwrap()
+                .all_time_recorded
+                .total_tokens,
+            100
+        );
+        db.save_rollout_batch(
+            "test-rollout",
+            500,
+            "{}",
+            &[(event("exact", legacy.captured_at, 100), "codex".into())],
+        )
+        .unwrap();
+        assert_eq!(
+            db.get_token_totals("default", 0, 0, i64::MAX, 0, i64::MAX)
+                .unwrap()
+                .all_time_recorded
+                .total_tokens,
+            100
+        );
     }
 }

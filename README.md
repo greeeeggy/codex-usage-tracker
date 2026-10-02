@@ -41,3 +41,15 @@ Codex Meter is built with:
 - **React + TypeScript**: Frontend UI
 - **Tailwind CSS v4**: Styling
 - **Zustand**: State management
+
+## Pricing and limit history (0.2.0)
+
+- Prices are fetched from the official OpenAI pricing Markdown every six hours, with hourly retry after failures. Model names and rates are discovered from the published standard text-token tables. No API key is required. Settings shows all discovered models, freshness, and a manual update button. A failed update retains the last successful SQLite cache; missing prices stay unavailable rather than falling back to another model.
+- Cost estimates use standard API rates, including published cache-write and long-context rates. Subscription quota is separate. Session summary estimates use aggregate base rates; per-request details apply the long-context threshold. Pricing updates invalidate saved session summaries.
+- Limits shows persistent five-hour, weekly, and other reported windows for every limit bucket. Each record has start/reset timestamps, current or completed status, recorded token breakdown, and last observed quota percentage. Records survive resets and restarts and can be filtered and paged without deleting older periods.
+- Rollout logs are replayed from durable byte checkpoints, including archived sessions. Token accounting uses original request timestamps and half-open intervals `[start, reset)`, so boundary requests enter the new period. Repeated cumulative notifications are ignored, incomplete lines are retried, and token rows/checkpoints commit together. App-server token notifications are not added a second time.
+- Totals represent logs available on this computer. Other-device usage, deleted logs, and missing limit attribution cannot be reconstructed. Five-hour and weekly views overlap. The quota API reports percentages rather than exact token caps; quota percentages are not converted into token totals.
+
+## GitHub Windows builds
+
+The `Test and build Windows executable` workflow checks frontend types, runs Rust regression tests (including the live pricing source), checks the Limits/pricing screens in Chromium, builds a Windows executable and NSIS installer, and confirms the executable starts. The `Codex-Meter-Windows` artifact contains `Codex-Meter.exe`, `Codex-Meter-setup.exe`, and a build manifest with the source commit and SHA-256 hashes. This workflow performs all application compilation on GitHub Actions.

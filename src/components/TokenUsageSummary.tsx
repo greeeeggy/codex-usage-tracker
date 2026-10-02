@@ -1,3 +1,4 @@
+import { useUsageStore } from '../stores/usageStore';
 import { Hash } from 'lucide-react';
 import { AccountUsage, ChatSessionSummary, TokenTotals } from '../types/usage';
 import { formatNumber, formatUsd } from '../utils/cn';
@@ -9,6 +10,7 @@ interface TokenUsageSummaryProps {
 }
 
 export function TokenUsageSummary({ accountUsage, tokenTotals, currentChat }: TokenUsageSummaryProps) {
+  const pricing = useUsageStore(s => s.pricing);
   const authoritativeLifetime = accountUsage?.summary?.lifetimeTokens;
   const lifetimeTokens = authoritativeLifetime ?? tokenTotals?.allTimeRecorded.totalTokens ?? null;
   const metrics = [
@@ -88,6 +90,9 @@ export function TokenUsageSummary({ accountUsage, tokenTotals, currentChat }: To
         </div>
       )}
 
+      <p className="text-[11px] mb-3" style={{ color: 'var(--text-muted)' }}>
+        {pricing?.fetchedAt ? `Standard API estimates · Prices updated ${new Date(pricing.fetchedAt * 1000).toLocaleString()}${pricing.lastError ? ' · Using saved prices' : ''}` : 'Prices unavailable until the first successful update'}
+      </p>
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         {metrics.map((metric) => (
           <div

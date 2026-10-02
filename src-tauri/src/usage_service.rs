@@ -511,6 +511,7 @@ impl UsageService {
 
 /// Persist each window of a snapshot as a quota sample in the database.
 fn persist_quota_samples(db: &crate::db::Db, snapshot: &UsageSnapshot) {
+    crate::limit_history::persist_snapshot(db, snapshot);
     let now = chrono::Utc::now().timestamp();
     let account_key = "default";
 
@@ -547,7 +548,13 @@ fn update_snapshot_state(s: &mut UsageState, mut new_snapshot: UsageSnapshot) ->
         for new_win in &mut new_snapshot.windows {
             if new_win.used_percent == 0.0 {
                 if let Some(old_win) = existing.windows.iter().find(|w| w.name == new_win.name) {
-                    if old_win.used_percent == 0.0 && old_win.resets_at.is_some() {
+                    if old_win.used_percent == 0.0
+                        && old_win
+                            .resets_at
+                            .as_deref()
+                            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                            .is_some_and(|t| t.timestamp() > chrono::Utc::now().timestamp())
+                    {
                         new_win.resets_at = old_win.resets_at.clone();
                     }
                 }
@@ -586,6 +593,9 @@ fn token_window_bounds(
                     .map(|minutes| minutes as i64 * 60)
                     .unwrap_or(fallback_duration_secs);
                 let end = reset.timestamp();
+                if end <= now {
+                    return (now, now);
+                }
                 return (end - duration_secs, end);
             }
         }
@@ -735,6 +745,7 @@ mod tests {
             rate_limit_reached_type: None,
             credits: None,
             windows: vec![window],
+            limits: Vec::new(),
             latest_context_window: None,
             latest_context_load_percent: None,
             latest_last_request_tokens: None,

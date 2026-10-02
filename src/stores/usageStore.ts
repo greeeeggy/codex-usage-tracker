@@ -12,6 +12,7 @@ import {
   UsageDeltas,
   UsageSnapshot,
   UsageWindow,
+  PricingCatalog,
 } from '../types/usage';
 
 let isInitialized = false;
@@ -23,6 +24,7 @@ interface UsageState {
   snapshot: UsageSnapshot | null;
   accountUsage: AccountUsage | null;
   currentChat: ChatSessionSummary | null;
+  pricing: PricingCatalog | null;
   tokenTotals: TokenTotals | null;
   quotaHistory: QuotaSampleRow[];
   usageDeltas: UsageDeltas | null;
@@ -50,6 +52,7 @@ export const useUsageStore = create<UsageState>((set, get) => ({
   snapshot: null,
   accountUsage: null,
   currentChat: null,
+  pricing: null,
   tokenTotals: null,
   quotaHistory: [],
   usageDeltas: null,
@@ -109,6 +112,8 @@ export const useUsageStore = create<UsageState>((set, get) => ({
           }
         };
         await loadCurrentChat();
+        const pricing = await invoke<PricingCatalog>('get_pricing').catch(() => null);
+        set({ pricing });
 
         const loadExtras = async () => {
           try {
@@ -125,6 +130,10 @@ export const useUsageStore = create<UsageState>((set, get) => ({
         if (isInitialized) return;
 
         // Register listeners only once per webview.
+        await listen('pricing-updated', (event: Event<PricingCatalog>) => {
+          set({ pricing: event.payload });
+          void loadCurrentChat();
+        });
         await listen('usage-updated', (event: Event<UsageSnapshot>) => {
           console.log('Usage updated:', event.payload);
           set({ snapshot: event.payload });

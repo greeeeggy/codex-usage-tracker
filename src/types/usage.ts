@@ -15,6 +15,7 @@ export interface UsageSnapshot {
   rateLimitReachedType: string | null;
   credits: { balance: string; hasCredits: boolean; unlimited: boolean } | null;
   windows: UsageWindow[];
+  limits: { limitId: string; limitName: string | null; windows: UsageWindow[] }[];
   latestContextWindow: number | null;
   latestContextLoadPercent: number | null;
   latestLastRequestTokens: TokenBreakdown | null;
@@ -163,4 +164,28 @@ export interface ChatTurnDetail {
 export interface ChatSessionDetail {
   summary: ChatSessionSummary;
   turns: ChatTurnDetail[];
+}
+
+export interface LimitPeriod {
+  id: number;
+  limitId: string;
+  limitName: string | null;
+  windowKind: string;
+  startedAt: number;
+  resetsAt: number;
+  firstObservedAt: number;
+  lastObservedAt: number;
+  usedPercent: number;
+  status: 'active' | 'completed';
+  tokens: TokenBreakdown;
+}
+
+export interface LimitHistoryPage { periods: LimitPeriod[]; total: number }
+
+export interface PriceRates { input: number; cachedInput: number | null; cacheWrite: number | null; output: number }
+export interface PricingCatalog {
+  source: string;
+  fetchedAt: number | null;
+  models: Record<string, { standard: PriceRates; longContext: PriceRates | null; longContextThreshold: number | null }>;
+  lastError: string | null;
 }

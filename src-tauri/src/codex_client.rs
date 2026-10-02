@@ -28,9 +28,19 @@ pub struct UsageSnapshot {
     pub rate_limit_reached_type: Option<String>,
     pub credits: Option<serde_json::Value>,
     pub windows: Vec<UsageWindow>,
+    #[serde(default)]
+    pub limits: Vec<LimitBucket>,
     pub latest_context_window: Option<i64>,
     pub latest_context_load_percent: Option<f64>,
     pub latest_last_request_tokens: Option<crate::db::TokenBreakdown>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitBucket {
+    pub limit_id: String,
+    pub limit_name: Option<String>,
+    pub windows: Vec<UsageWindow>,
 }
 
 /// A single rate-limit window (e.g., 5-hour or weekly)
@@ -89,7 +99,11 @@ struct JsonRpcMessage {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawWindow {
-    #[serde(alias = "windowDurationMins", alias = "window_duration_mins")]
+    #[serde(
+        alias = "windowDurationMins",
+        alias = "window_duration_mins",
+        alias = "window_minutes"
+    )]
     window_duration_mins: Option<u64>,
     #[serde(alias = "usedPercent", alias = "used_percent")]
     used_percent: Option<f64>,
@@ -103,9 +117,13 @@ struct RawWindow {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawSnapshot {
+    #[serde(alias = "limit_id")]
     limit_id: Option<String>,
+    #[serde(alias = "limit_name")]
     limit_name: Option<String>,
+    #[serde(alias = "plan_type")]
     plan_type: Option<String>,
+    #[serde(alias = "rate_limit_reached_type")]
     rate_limit_reached_type: Option<String>,
     credits: Option<serde_json::Value>,
     primary: Option<RawWindow>,
@@ -229,10 +247,12 @@ impl CodexClient {
                                 if method == "account/rateLimits/updated" {
                                     if let Some(params) = msg.params {
                                         if let Some(snapshot) = params.get("rateLimits") {
-                                            if let Ok(raw) = serde_json::from_value::<RawSnapshot>(
-                                                snapshot.clone(),
+                                            if let Ok(normalized) = parse_rate_limits(
+                                                &serde_json::json!({
+                                                    "rateLimits": snapshot,
+                                                    "rateLimitsByLimitId": params.get("rateLimitsByLimitId")
+                                                }),
                                             ) {
-                                                let normalized = normalize_snapshot(&raw);
                                                 let _ = event_tx_reader
                                                     .send(CodexEvent::UsageUpdated(normalized));
                                             }
@@ -423,34 +443,7 @@ impl CodexClient {
     /// Fetch current rate limits
     pub async fn read_rate_limits(&self) -> Result<UsageSnapshot, String> {
         let result = self.request("account/rateLimits/read", None).await?;
-        log::info!(
-            "[CODEX] Raw rate limits response: {}",
-            serde_json::to_string_pretty(&result).unwrap_or_default()
-        );
-
-        // Try to extract rate limits from the response
-        let snapshot_value = result
-            .get("rateLimitsByLimitId")
-            .and_then(|v| v.get("codex"))
-            .or_else(|| result.get("rateLimits"))
-            .ok_or("Codex returned no rate-limit snapshot")?;
-
-        log::info!(
-            "[CODEX] Extracted snapshot value: {}",
-            serde_json::to_string_pretty(&snapshot_value).unwrap_or_default()
-        );
-
-        let raw: RawSnapshot = serde_json::from_value(snapshot_value.clone())
-            .map_err(|e| format!("Failed to parse rate limits: {}", e))?;
-
-        log::info!(
-            "[CODEX] Parsed raw snapshot: planType={:?}, primary={:?}, secondary={:?}",
-            raw.plan_type,
-            raw.primary.is_some(),
-            raw.secondary.is_some()
-        );
-
-        Ok(normalize_snapshot(&raw))
+        parse_rate_limits(&result)
     }
 
     /// Fetch authoritative account-level token activity from Codex.
@@ -518,11 +511,58 @@ fn normalize_snapshot(raw: &RawSnapshot) -> UsageSnapshot {
         plan_type: raw.plan_type.clone(),
         rate_limit_reached_type: raw.rate_limit_reached_type.clone(),
         credits: raw.credits.clone(),
+        limits: vec![LimitBucket {
+            limit_id: raw.limit_id.clone().unwrap_or_else(|| "codex".into()),
+            limit_name: raw.limit_name.clone(),
+            windows: windows.clone(),
+        }],
         windows,
         latest_context_window: None,
         latest_context_load_percent: None,
         latest_last_request_tokens: None,
     }
+}
+
+pub(crate) fn parse_rate_limits(value: &serde_json::Value) -> Result<UsageSnapshot, String> {
+    let mut buckets = Vec::new();
+    if let Some(map) = value.get("rateLimitsByLimitId").and_then(|v| v.as_object()) {
+        for (id, bucket) in map {
+            if bucket.is_null() {
+                continue;
+            }
+            let mut raw: RawSnapshot =
+                serde_json::from_value(bucket.clone()).map_err(|e| e.to_string())?;
+            raw.limit_id = Some(id.clone());
+            buckets.push(normalize_snapshot(&raw));
+        }
+    }
+    if let Some(legacy) = value.get("rateLimits").filter(|v| !v.is_null()) {
+        let raw: RawSnapshot = serde_json::from_value(legacy.clone()).map_err(|e| e.to_string())?;
+        let id = raw.limit_id.as_deref().unwrap_or("codex");
+        if !buckets
+            .iter()
+            .any(|b| b.limit_id.as_deref().unwrap_or("codex") == id)
+        {
+            buckets.push(normalize_snapshot(&raw));
+        }
+    }
+    let selected = buckets
+        .iter()
+        .find(|b| b.limit_id.as_deref() == Some("codex"))
+        .or_else(|| buckets.first())
+        .ok_or("Codex returned no rate-limit snapshot")?;
+    let mut snapshot = selected.clone();
+    snapshot.limits = buckets.into_iter().flat_map(|b| b.limits).collect();
+    Ok(snapshot)
+}
+
+pub(crate) fn snapshot_from_rollout(
+    value: &serde_json::Value,
+    timestamp: &str,
+) -> Option<UsageSnapshot> {
+    let mut snapshot = parse_rate_limits(&serde_json::json!({ "rateLimits": value })).ok()?;
+    snapshot.captured_at = timestamp.to_string();
+    Some(snapshot)
 }
 
 /// Normalize a single window
@@ -622,5 +662,41 @@ mod tests {
                 .and_then(|buckets| buckets.first().map(|bucket| bucket.tokens)),
             Some(12_345)
         );
+    }
+}
+
+#[cfg(test)]
+mod bucket_tests {
+    use super::*;
+    #[test]
+    fn map_reads_every_bucket_and_deduplicates_legacy() {
+        let result = serde_json::json!({"rateLimitsByLimitId": {
+            "codex": {"primary": {"windowDurationMins": 300, "usedPercent": 10, "resetsAt": 1800000000}},
+            "new-model": {"limitName": "New model", "secondary": {"windowDurationMins": 10080, "usedPercent": 30, "resetsAt": 1800000000}}
+        }, "rateLimits": {"limitId": "codex", "primary": {"windowDurationMins": 300, "usedPercent": 10, "resetsAt": 1800000000}}});
+        let snapshot = parse_rate_limits(&result).unwrap();
+        assert_eq!(snapshot.limit_id.as_deref(), Some("codex"));
+        assert_eq!(snapshot.limits.len(), 2);
+        assert_eq!(
+            snapshot
+                .limits
+                .iter()
+                .find(|b| b.limit_id == "new-model")
+                .unwrap()
+                .windows[0]
+                .name,
+            "weekly"
+        );
+    }
+    #[test]
+    fn accepts_rollout_snake_case_schema() {
+        let snapshot = snapshot_from_rollout(
+            &serde_json::json!({"limit_id": "new-coder", "limit_name": "New coder",
+            "primary": {"window_minutes": 300, "used_percent": 15, "resets_at": 1800000000}}),
+            "2026-10-02T12:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(snapshot.limits[0].limit_id, "new-coder");
+        assert_eq!(snapshot.windows[0].name, "fiveHour");
     }
 }

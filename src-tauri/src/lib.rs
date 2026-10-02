@@ -1,7 +1,9 @@
 mod codex_client;
 mod commands;
 mod db;
+mod limit_history;
 mod local_server;
+mod pricing;
 mod process_detector;
 mod session_history;
 mod session_log_watcher;
@@ -43,6 +45,13 @@ pub fn run() {
 
             // Store the shared state for Tauri commands
             app.manage(shared_state.clone());
+            pricing::initialize(&db);
+            db.backfill_limit_periods().map_err(std::io::Error::other)?;
+            let pricing_db = db.clone();
+            let pricing_app = app_handle.clone();
+            rt.spawn(async move {
+                pricing::run(pricing_db, pricing_app).await;
+            });
             app.manage(db);
 
             // Create SSE broadcast channel for local server
@@ -221,6 +230,9 @@ pub fn run() {
             commands::get_chat_sessions,
             commands::get_chat_session_detail,
             commands::get_current_chat_summary,
+            commands::get_pricing,
+            commands::refresh_pricing,
+            commands::get_limit_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
