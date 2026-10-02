@@ -26,7 +26,7 @@ test.beforeEach(async ({ page }) => {
         if (command === 'get_monitor_state') return { state: 'monitoring', errorMessage: null, detectedClients: [] };
         if (command === 'get_usage') return { capturedAt: new Date().toISOString(), limitId: 'codex', limitName: null, planType: 'plus', windows: [window], limits: [{ limitId: 'codex', limitName: null, windows: [window] }], credits: null };
         if (command === 'get_token_totals') return { currentSession: tokens, fiveHourWindow: tokens, weeklyWindow: tokens, today: tokens, currentMonth: tokens, allTimeRecorded: tokens };
-        if (command === 'get_account_usage') return { summary: { lifetimeTokens: 9000 }, dailyUsageBuckets: [{ startDate: '2026-10-02', tokens: 8000 }], fetchedAt: Math.floor(Date.now() / 1000) };
+        if (command === 'get_account_usage') return { summary: { lifetimeTokens: (globalThis as unknown as { __meterAccountTokens?: number }).__meterAccountTokens ?? 9000 }, dailyUsageBuckets: [{ startDate: '2026-10-02', tokens: 8000 }], fetchedAt: Math.floor(Date.now() / 1000) };
         if (command === 'get_account_usage_days') return { days: [{ startDate: '2026-10-02', tokens: 8000, observedAt: Math.floor(Date.now() / 1000) }], total: 1 };
         if (command === 'get_quota_history' || command === 'get_recent_events' || command === 'get_chat_sessions') return [];
         if (command === 'get_limit_history') { const rows = periods.filter(p => (!args.limitId || p.limitId === args.limitId) && (!args.windowKind || p.windowKind === args.windowKind)); return { periods: rows, total: rows.length }; }
@@ -77,4 +77,14 @@ test('Limits separates server-wide activity from exact local window tokens', asy
   await expect(local.getByRole('columnheader', { name: 'Local tokens', exact: true })).toBeVisible();
   await expect(local.getByText('9,000', { exact: true })).toHaveCount(0);
   await page.screenshot({ path: 'test-results/account-coverage.png', fullPage: true });
+});
+
+test('An incomplete server summary cannot replace known local lifetime usage with zero', async ({ page }) => {
+  await page.addInitScript(() => Object.assign(globalThis, { __meterAccountTokens: 0 }));
+  await page.goto('/');
+  const summary = page.getByRole('region', { name: 'Tokens used' });
+  await expect(summary.getByText('Lifetime · local', { exact: true })).toBeVisible();
+  await expect(summary.getByText('Local totals · account total unavailable or incomplete', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Limits', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Account-wide usage coverage' }).getByText(/may be delayed or incomplete/)).toBeVisible();
 });

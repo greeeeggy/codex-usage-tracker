@@ -6,6 +6,7 @@ import { AccountDayPage } from '../types/usage';
 export function AccountUsageCoverage() {
   const account = useUsageStore(s => s.accountUsage);
   const snapshot = useUsageStore(s => s.snapshot);
+  const local = useUsageStore(s => s.tokenTotals?.allTimeRecorded.totalTokens ?? 0);
   const [page, setPage] = useState<AccountDayPage>({ days: [], total: 0 });
   const [offset, setOffset] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -17,6 +18,9 @@ export function AccountUsageCoverage() {
     return () => { disposed = true; };
   }, [account, offset]);
   const fetched = account?.fetchedAt;
+  const lifetime = account?.summary?.lifetimeTokens;
+  const incomplete = lifetime !== null && lifetime !== undefined &&
+    (lifetime < local || (lifetime === 0 && snapshot?.windows.some(w => w.usedPercent > 0)));
   return (
     <section className="rounded-2xl p-5 space-y-3" aria-label="Account-wide usage coverage"
       style={{ background: 'var(--bg-card)', border: '1px solid var(--border-default)' }}>
@@ -34,6 +38,7 @@ export function AccountUsageCoverage() {
         Server totals are kept separately from local logs to avoid double counting. The service does not provide exact remote tokens for each limit period;
         daily totals cannot be split accurately across five-hour windows or model buckets. Missed observations while this app is closed cannot be reconstructed.
       </p>
+      {incomplete && <p role="status" className="text-xs" style={{ color: 'var(--warning)' }}>The server token summary does not match available usage and may be delayed or incomplete. It is not used as a complete lifetime total.</p>}
       {error && <p role="alert" className="text-xs" style={{ color: 'var(--danger)' }}>{error}</p>}
       <details>
         <summary className="text-sm cursor-pointer" style={{ color: 'var(--text-secondary)' }}>{page.total} saved days · Server-reported tokens</summary>

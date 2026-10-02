@@ -11,14 +11,18 @@ interface TokenUsageSummaryProps {
 
 export function TokenUsageSummary({ accountUsage, tokenTotals, currentChat }: TokenUsageSummaryProps) {
   const pricing = useUsageStore(s => s.pricing);
-  const authoritativeLifetime = accountUsage?.summary?.lifetimeTokens;
-  const lifetimeTokens = authoritativeLifetime ?? tokenTotals?.allTimeRecorded.totalTokens ?? null;
+  const snapshot = useUsageStore(s => s.snapshot);
+  const reportedLifetime = accountUsage?.summary?.lifetimeTokens;
+  const localLifetime = tokenTotals?.allTimeRecorded.totalTokens ?? 0;
+  const usableReport = reportedLifetime !== null && reportedLifetime !== undefined && reportedLifetime >= localLifetime &&
+    !(reportedLifetime === 0 && snapshot?.windows.some(w => w.usedPercent > 0));
+  const lifetimeTokens = usableReport ? reportedLifetime : tokenTotals?.allTimeRecorded.totalTokens ?? null;
   const metrics = [
     { label: 'Current chat', value: currentChat?.usage.totalTokens ?? tokenTotals?.currentSession.totalTokens ?? null },
     { label: '5-hour · local', value: tokenTotals?.fiveHourWindow.totalTokens ?? null },
     { label: 'Weekly · local', value: tokenTotals?.weeklyWindow.totalTokens ?? null },
     { label: 'Today · local', value: tokenTotals?.today.totalTokens ?? null },
-    { label: 'Lifetime', value: lifetimeTokens, accent: true },
+    { label: usableReport ? 'Lifetime · server' : 'Lifetime · local', value: lifetimeTokens, accent: true },
   ];
 
   return (
@@ -35,9 +39,7 @@ export function TokenUsageSummary({ accountUsage, tokenTotals, currentChat }: To
           </h3>
         </div>
         <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-          {authoritativeLifetime !== null && authoritativeLifetime !== undefined
-            ? 'Lifetime total from Codex'
-            : 'Local totals'}
+          {usableReport ? 'Lifetime reported by Codex' : 'Local totals · account total unavailable or incomplete'}
         </span>
       </div>
 
