@@ -2,11 +2,12 @@ import { invoke } from '@tauri-apps/api/core';
 import { useEffect, useState } from 'react';
 import { useUsageStore } from '../stores/usageStore';
 import { AccountDayPage } from '../types/usage';
+import { lifetimeCoverage } from '../utils/usageCoverage';
 
 export function AccountUsageCoverage() {
   const account = useUsageStore(s => s.accountUsage);
   const snapshot = useUsageStore(s => s.snapshot);
-  const local = useUsageStore(s => s.tokenTotals?.allTimeRecorded.totalTokens ?? 0);
+  const tokens = useUsageStore(s => s.tokenTotals);
   const [page, setPage] = useState<AccountDayPage>({ days: [], total: 0 });
   const [offset, setOffset] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -18,9 +19,7 @@ export function AccountUsageCoverage() {
     return () => { disposed = true; };
   }, [account, offset]);
   const fetched = account?.fetchedAt;
-  const lifetime = account?.summary?.lifetimeTokens;
-  const incomplete = lifetime !== null && lifetime !== undefined &&
-    (lifetime < local || (lifetime === 0 && snapshot?.windows.some(w => w.usedPercent > 0)));
+  const { incomplete } = lifetimeCoverage(account, tokens, snapshot);
   return (
     <section className="rounded-2xl p-5 space-y-3" aria-label="Account-wide usage coverage"
       style={{ background: 'var(--bg-card)', border: '1px solid var(--border-default)' }}>

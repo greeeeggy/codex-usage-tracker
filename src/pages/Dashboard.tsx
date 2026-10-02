@@ -13,6 +13,7 @@ import { PricingCatalogCard } from '../components/PricingCatalogCard';
 import { ChatSessionHistory } from '../components/ChatSessionHistory';
 import { Activity, RefreshCw, Layers, History as HistoryIcon, Gauge, MonitorDot, Lightbulb, Settings as SettingsIcon, Cpu } from 'lucide-react';
 import { formatNumber, formatUsd } from '../utils/cn';
+import { lifetimeCoverage } from '../utils/usageCoverage';
 
 export function Dashboard() {
   const init = useUsageStore((s) => s.init);
@@ -52,6 +53,7 @@ export function Dashboard() {
     (w) => w.name === 'fiveHour' || w.durationMinutes === 300
   );
   const currentChatUsage = currentChat?.usage ?? tokenTotals?.currentSession;
+  const lifetime = lifetimeCoverage(accountUsage, tokenTotals, snapshot);
 
   // Error / auth required state
   if ((monitorState === 'error' || monitorState === 'authRequired') && !['limits', 'history', 'settings'].includes(activePage)) {
@@ -375,12 +377,9 @@ export function Dashboard() {
               <div className="rounded-2xl p-5" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-default)' }}>
                 <span className="text-xs font-medium block mb-1" style={{ color: 'var(--text-muted)' }}>Lifetime Total</span>
                 <span className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>
-                  {accountUsage?.summary?.lifetimeTokens
-                    ? formatNumber(accountUsage.summary.lifetimeTokens)
-                    : tokenTotals?.allTimeRecorded.totalTokens
-                      ? formatNumber(tokenTotals.allTimeRecorded.totalTokens)
-                      : '0'}
+                  {lifetime.value !== null ? formatNumber(lifetime.value) : '—'}
                 </span>
+                <p className="text-xs mt-2" style={{ color: 'var(--text-muted)' }}>{lifetime.usableReport ? 'Reported by Codex' : 'Local records · account total unavailable or incomplete'}</p>
               </div>
             </div>
           </div>

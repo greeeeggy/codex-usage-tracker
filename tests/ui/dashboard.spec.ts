@@ -79,12 +79,14 @@ test('Limits separates server-wide activity from exact local window tokens', asy
   await page.screenshot({ path: 'test-results/account-coverage.png', fullPage: true });
 });
 
-test('An incomplete server summary cannot replace known local lifetime usage with zero', async ({ page }) => {
-  await page.addInitScript(() => Object.assign(globalThis, { __meterAccountTokens: 0 }));
+for (const reported of [0, 50]) test(`An incomplete server summary (${reported}) cannot replace known local lifetime usage`, async ({ page }) => {
+  await page.addInitScript(value => Object.assign(globalThis, { __meterAccountTokens: value }), reported);
   await page.goto('/');
   const summary = page.getByRole('region', { name: 'Tokens used' });
   await expect(summary.getByText('Lifetime · local', { exact: true })).toBeVisible();
   await expect(summary.getByText('Local totals · account total unavailable or incomplete', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Insights', exact: true }).click();
+  await expect(page.getByText('Lifetime Total', { exact: true }).locator('..').getByText('100', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Limits', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Account-wide usage coverage' }).getByText(/may be delayed or incomplete/)).toBeVisible();
 });
