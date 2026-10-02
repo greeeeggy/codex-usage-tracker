@@ -241,7 +241,7 @@ pub async fn refresh(db: &crate::db::Db, force: bool) -> Result<Catalog, String>
     {
         return Ok(current);
     }
-    let result = async {
+    let result: Result<Catalog, String> = async {
         let response = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(20))
             .build()

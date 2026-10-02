@@ -219,6 +219,21 @@ pub async fn run(db: Arc<Db>, app: tauri::AppHandle, state: Arc<RwLock<UsageStat
                     if context.timestamp >= latest_time {
                         latest_time = context.timestamp;
                         let mut s = state.write().await;
+                        if s.snapshot.is_none() {
+                            s.snapshot = Some(crate::codex_client::UsageSnapshot {
+                                captured_at: chrono::Utc::now().to_rfc3339(),
+                                limit_id: None,
+                                limit_name: None,
+                                plan_type: None,
+                                rate_limit_reached_type: None,
+                                credits: None,
+                                windows: Vec::new(),
+                                limits: Vec::new(),
+                                latest_context_window: None,
+                                latest_context_load_percent: None,
+                                latest_last_request_tokens: None,
+                            });
+                        }
                         if let Some(snapshot) = &mut s.snapshot {
                             snapshot.latest_context_window = context.context_window;
                             snapshot.latest_context_load_percent =

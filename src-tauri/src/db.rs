@@ -330,7 +330,7 @@ impl Db {
         }
         // Existing quota observations preserve known reset boundaries. Never
         // manufacture periods in unobserved gaps.
-        let samples: Vec<(i64, String, u64, i64, f64)> = {
+        let samples: Vec<(i64, String, i64, i64, f64)> = {
             let conn = self.conn.lock().unwrap();
             let mut stmt = conn.prepare("SELECT captured_at, window_kind, duration_minutes, resets_at, used_percent
                 FROM quota_samples WHERE resets_at IS NOT NULL AND duration_minutes > 0 ORDER BY captured_at")
@@ -344,7 +344,7 @@ impl Db {
                 .map_err(|e| e.to_string())?
         };
         for (captured, kind, duration, reset, used) in samples {
-            self.record_limit_period("codex", None, &kind, duration, reset, captured, used)?;
+            self.record_limit_period("codex", None, &kind, duration as u64, reset, captured, used)?;
         }
         self.set_setting("limit_history_backfilled", "true")?;
         Ok(())
@@ -418,7 +418,7 @@ impl Db {
             .query_row(
                 "SELECT offset, state_json FROM rollout_checkpoints WHERE file_key = ?1",
                 [key],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get::<_, i64>(0)?.max(0) as u64, r.get(1)?)),
             )
             .optional()
             .map_err(|e| e.to_string())
