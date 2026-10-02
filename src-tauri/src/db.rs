@@ -787,7 +787,6 @@ impl Db {
                      FROM counted_token_events
                      WHERE account_key = ?1
                        AND thread_id IS NOT NULL
-                       AND event_type = 'local_rollout'
                      ORDER BY captured_at DESC
                      LIMIT 1",
                 )
