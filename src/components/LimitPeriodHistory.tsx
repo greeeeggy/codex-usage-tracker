@@ -58,15 +58,15 @@ export function LimitPeriodHistory() {
         </div>
       </div>
       <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
-        Completed periods stay saved after resets and restarts. Tokens come from this computer’s Codex logs;
-        usage from other devices and deleted logs is unavailable. Quota percentages are reported by Codex.
+        Completed periods stay saved after resets and restarts. Local tokens cover requests with shared-limit attribution in this computer’s Codex logs.
+        Account quota includes Work, Codex, web, cloud, and other clients sharing the allowance. Exact remote tokens per period are unavailable.
         Five-hour and weekly totals overlap; do not add them together.
       </p>
       {error && <p role="alert" style={{ color: 'var(--danger)' }}>{error}</p>}
       <div className="overflow-x-auto">
         <table className="w-full text-sm text-left" aria-label="Limit period token history" aria-busy={loading}>
           <thead style={{ color: 'var(--text-muted)' }}>
-            <tr>{['Limit / window', 'Start', 'Reset', 'Status', 'Total tokens', 'Input', 'Cached input', 'Output', 'Quota used'].map(h => <th key={h} className="p-3 whitespace-nowrap">{h}</th>)}</tr>
+            <tr>{['Limit / window', 'Start', 'Reset', 'Status', 'Local tokens', 'Input', 'Cached input', 'Output', 'Observed quota'].map(h => <th key={h} className="p-3 whitespace-nowrap">{h}</th>)}</tr>
           </thead>
           <tbody style={{ color: 'var(--text-primary)' }}>
             {page.periods.map(period => (

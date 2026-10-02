@@ -40,6 +40,17 @@ pub async fn get_limit_history(
     .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+pub async fn get_account_usage_days(
+    db: tauri::State<'_, Arc<crate::db::Db>>,
+    offset: Option<i64>,
+) -> Result<crate::limit_history::AccountDayPage, String> {
+    let db = db.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || db.get_account_usage_days(offset.unwrap_or(0)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Tauri command: Get current usage snapshot
 #[tauri::command]
 pub async fn get_usage(

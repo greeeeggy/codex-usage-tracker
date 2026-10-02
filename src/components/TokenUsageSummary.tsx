@@ -15,9 +15,9 @@ export function TokenUsageSummary({ accountUsage, tokenTotals, currentChat }: To
   const lifetimeTokens = authoritativeLifetime ?? tokenTotals?.allTimeRecorded.totalTokens ?? null;
   const metrics = [
     { label: 'Current chat', value: currentChat?.usage.totalTokens ?? tokenTotals?.currentSession.totalTokens ?? null },
-    { label: '5-hour window', value: tokenTotals?.fiveHourWindow.totalTokens ?? null },
-    { label: 'This week', value: tokenTotals?.weeklyWindow.totalTokens ?? null },
-    { label: 'Today', value: tokenTotals?.today.totalTokens ?? null },
+    { label: '5-hour · local', value: tokenTotals?.fiveHourWindow.totalTokens ?? null },
+    { label: 'Weekly · local', value: tokenTotals?.weeklyWindow.totalTokens ?? null },
+    { label: 'Today · local', value: tokenTotals?.today.totalTokens ?? null },
     { label: 'Lifetime', value: lifetimeTokens, accent: true },
   ];
 
@@ -93,6 +93,7 @@ export function TokenUsageSummary({ accountUsage, tokenTotals, currentChat }: To
       <p className="text-[11px] mb-3" style={{ color: 'var(--text-muted)' }}>
         {pricing?.fetchedAt ? `Standard API estimates · Prices updated ${new Date(pricing.fetchedAt * 1000).toLocaleString()}${pricing.lastError ? ' · Using saved prices' : ''}` : 'Prices unavailable until the first successful update'}
       </p>
+      <p className="text-[11px] mb-3" style={{ color: 'var(--text-muted)' }}>Shared quota includes web/cloud activity. Window token counts cover local requests with limit attribution; exact remote window tokens are not provided.</p>
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         {metrics.map((metric) => (
           <div

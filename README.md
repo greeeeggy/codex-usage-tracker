@@ -1,11 +1,11 @@
 # Codex Meter
 
-A live, lightweight desktop monitor for OpenAI Codex usage limits. Codex Meter runs silently in your system tray, tracks your 5-hour and weekly usage across all Codex clients (Desktop App, CLI, VS Code), and alerts you when your quota is low.
+A live, lightweight desktop monitor for the shared OpenAI Work/Codex usage allowance. Codex Meter runs in your system tray, records five-hour and weekly quota observations across desktop, CLI, IDE, web, cloud, and other clients using the same allowance, and alerts you when your quota is low.
 
 ## Features
 
 - **Live Tracking**: Directly reads `codex app-server` data without API keys
-- **Smart Activation**: Runs in dormant mode (near-zero CPU) until a Codex client opens
+- **Account Monitoring**: Keeps polling shared quota while the monitor is running, including when no local Codex client is open
 - **Floating Widget**: Always-on-top compact desktop widget
 - **System Tray**: Quick access to usage data and settings
 - **Desktop Alerts**: Notifications at 25%, 10%, and 5% remaining
@@ -46,9 +46,10 @@ Codex Meter is built with:
 
 - Prices are fetched from the official OpenAI pricing Markdown every six hours, with hourly retry after failures. Model names and rates are discovered from the published standard text-token tables. No API key is required. Settings shows all discovered models, freshness, and a manual update button. A failed update retains the last successful SQLite cache; missing prices stay unavailable rather than falling back to another model.
 - Cost estimates use standard API rates, including published cache-write and long-context rates. Subscription quota is separate. Session summary estimates use aggregate base rates; per-request details apply the long-context threshold. Pricing updates invalidate saved session summaries.
-- Limits shows persistent five-hour, weekly, and other reported windows for every limit bucket. Each record has start/reset timestamps, current or completed status, recorded token breakdown, and last observed quota percentage. Records survive resets and restarts and can be filtered and paged without deleting older periods.
+- Limits shows persistent five-hour, weekly, and other reported windows for every limit bucket. Each record has start/reset timestamps, current or completed status, locally attributed token breakdown, and last observed account-wide quota percentage. Records survive resets and restarts and can be filtered and paged without deleting older periods.
 - Rollout logs are replayed from durable byte checkpoints, including archived sessions. Token accounting uses original request timestamps and half-open intervals `[start, reset)`, so boundary requests enter the new period. Shared turn/counter identities deduplicate copied fork history and retain the earliest original timestamp. Repeated cumulative notifications are ignored, incomplete lines are retried, and token rows/checkpoints commit together. App-server token notifications are not added a second time.
-- Totals represent logs available on this computer. Other-device usage, deleted logs, and missing limit attribution cannot be reconstructed. Five-hour and weekly views overlap. The quota API reports percentages rather than exact token caps; quota percentages are not converted into token totals.
+- Shared quota monitoring includes Work/Codex, web/cloud, other devices, and connected clients consuming the same allowance. It does not depend on detecting a local window. Server-reported account lifetime/day token activity is fetched separately, cached, and retained by reported day; repeat observations replace each day's total instead of adding to it. Limits displays this activity separately from local request totals. Ordinary Chat conversations and separately billed API activity are not collected.
+- Period token totals cover available local requests with shared-limit attribution. Rows lacking this attribution and old unscoped aggregates are retained but excluded from these totals. Exact remote per-period tokens, deleted logs, and observations missed while the monitor is closed cannot be reconstructed from the supported API. Daily account totals cannot be split reliably across arbitrary five-hour/weekly boundaries or model buckets. Five-hour and weekly views overlap; account and local totals must not be added together. Quota percentages are never converted into invented token totals. See the [official account usage and rate-limit API](https://learn.chatgpt.com/docs/app-server).
 
 ## GitHub Windows builds
 

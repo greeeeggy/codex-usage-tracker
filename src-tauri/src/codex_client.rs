@@ -61,6 +61,8 @@ pub struct UsageWindow {
 pub struct AccountUsage {
     pub summary: Option<AccountUsageSummary>,
     pub daily_usage_buckets: Option<Vec<DailyUsageBucket>>,
+    #[serde(default)]
+    pub fetched_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -390,7 +392,7 @@ impl CodexClient {
                     "clientInfo": {
                         "name": "codex_meter",
                         "title": "Codex Meter",
-                        "version": "0.1.0"
+                        "version": env!("CARGO_PKG_VERSION")
                     }
                 })),
             )

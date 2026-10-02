@@ -68,6 +68,11 @@ impl UsageService {
         let initial_state = UsageState {
             token_totals,
             session_start_ts: now,
+            account_usage: db
+                .get_setting("account_usage_cache")
+                .ok()
+                .flatten()
+                .and_then(|json| serde_json::from_str(&json).ok()),
             ..UsageState::default()
         };
 
@@ -95,7 +100,7 @@ impl UsageService {
         let db_clone = self.db.clone();
         let db_for_samples = self.db.clone();
 
-        let mut grace_period_start: Option<Instant> = None;
+        let mut next_connect_at = Instant::now();
         let mut client: Option<CodexClient> = None;
         let mut refresh_interval = tokio::time::interval(Duration::from_secs(30));
         let mut process_check_interval = tokio::time::interval(Duration::from_secs(3));
@@ -144,8 +149,11 @@ impl UsageService {
                     };
 
                     match (&current_state, has_clients) {
-                        (MonitorState::Dormant, true) => {
-                            log::info!("Codex client detected, starting monitoring...");
+                        (MonitorState::Dormant, _) if Instant::now() >= next_connect_at => {
+                            // The shared allowance can be used on the web or in
+                            // cloud Work while no local client is open.
+                            next_connect_at = Instant::now() + Duration::from_secs(30);
+                            log::info!("Starting account-wide quota monitoring...");
                             let session_ts = chrono::Utc::now().timestamp();
                             {
                                 let mut s = state.write().await;
@@ -159,7 +167,7 @@ impl UsageService {
                             let _ = db_for_samples.insert_app_event(
                                 "session_started",
                                 "Monitoring started",
-                                Some("Codex client detected, connecting to app-server"),
+                                Some("Connecting to shared Work/Codex account limits"),
                             );
 
                             // Start Codex client
@@ -198,7 +206,7 @@ impl UsageService {
                                             }).collect();
                                             send_notification(
                                                 &app_handle,
-                                                "Codex is now open",
+                                                "Usage monitor connected",
                                                 &status_parts.join(" · "),
                                             );
 
@@ -223,8 +231,9 @@ impl UsageService {
                                         Err(e) => {
                                             log::error!("[DATA] FAILED to read initial rate limits: {}", e);
                                             let mut s = state.write().await;
-                                            s.monitor_state = MonitorState::Monitoring;
-                                            let _ = app_handle.emit("state-changed", "monitoring");
+                                            s.monitor_state = MonitorState::Error;
+                                            s.error_message = Some(e);
+                                            let _ = app_handle.emit("state-changed", &s.monitor_state);
                                         }
                                     }
 
@@ -240,6 +249,7 @@ impl UsageService {
 
                                     if let Err(e) = refresh_account_usage(
                                         &new_client,
+                                        &db_clone,
                                         &state,
                                         &app_handle,
                                     )
@@ -251,6 +261,7 @@ impl UsageService {
                                     client = Some(new_client);
                                 }
                                 Err(e) => {
+                                    new_client.stop();
                                     log::error!("[CONNECT] FAILED to start Codex client: {}", e);
                                     let _ = db_for_samples.insert_app_event(
                                         "refresh_failed",
@@ -273,62 +284,7 @@ impl UsageService {
                             }
                         }
 
-                        (MonitorState::Monitoring, false) => {
-                            log::info!("No Codex clients detected, entering grace period...");
-                            grace_period_start = Some(Instant::now());
-                            {
-                                let mut s = state.write().await;
-                                s.monitor_state = MonitorState::GracePeriod;
-                            }
-                            let _ = app_handle.emit("state-changed", "gracePeriod");
-                            let _ = db_for_samples.insert_app_event(
-                                "monitoring_paused",
-                                "Grace period entered",
-                                Some("Codex client no longer detected"),
-                            );
-                        }
-
-                        (MonitorState::GracePeriod, true) => {
-                            log::info!("Codex client re-detected, resuming monitoring");
-                            grace_period_start = None;
-                            {
-                                let mut s = state.write().await;
-                                s.monitor_state = MonitorState::Monitoring;
-                            }
-                            let _ = app_handle.emit("state-changed", "monitoring");
-                            let _ = db_for_samples.insert_app_event(
-                                "monitoring_resumed",
-                                "Monitoring resumed",
-                                Some("Codex client re-detected during grace period"),
-                            );
-                        }
-
-                        (MonitorState::GracePeriod, false) => {
-                            if let Some(start) = grace_period_start {
-                                if start.elapsed() > Duration::from_secs(60) {
-                                    log::info!("Grace period expired, going dormant");
-                                    grace_period_start = None;
-
-                                    if let Some(c) = client.take() {
-                                        c.stop();
-                                    }
-
-                                    {
-                                        let mut s = state.write().await;
-                                        s.monitor_state = MonitorState::Dormant;
-                                    }
-                                    alert_states.clear();
-                                    let _ = app_handle.emit("state-changed", "dormant");
-                                    let _ = db_for_samples.insert_app_event(
-                                        "session_ended",
-                                        "Monitoring stopped",
-                                        Some("Grace period expired, going dormant"),
-                                    );
-                                }
-                            }
-                        }
-
-                        (MonitorState::Error, true) => {
+                        (MonitorState::Error | MonitorState::AuthRequired, _) if client.is_none() && Instant::now() >= next_connect_at => {
                             // Retry connection after error
                             {
                                 let mut s = state.write().await;
@@ -343,11 +299,7 @@ impl UsageService {
 
                 // Periodic refresh tick (30 seconds)
                 _ = refresh_interval.tick() => {
-                    let current_state = {
-                        state.read().await.monitor_state.clone()
-                    };
-
-                    if current_state == MonitorState::Monitoring {
+                    if client.is_some() {
                         if let Some(c) = &client {
                             match c.read_rate_limits().await {
                                 Ok(snapshot) => {
@@ -371,12 +323,17 @@ impl UsageService {
                                     }
 
                                     let _ = app_handle.emit("usage-updated", &snapshot);
+                                    let _ = app_handle.emit("state-changed", "monitoring");
 
                                     // Check notification thresholds
                                     check_notifications(&snapshot, &mut alert_states, &app_handle);
                                 }
                                 Err(e) => {
                                     log::warn!("Failed to refresh rate limits: {}", e);
+                                    let mut s = state.write().await;
+                                    s.monitor_state = MonitorState::Error;
+                                    s.error_message = Some(e);
+                                    let _ = app_handle.emit("state-changed", &s.monitor_state);
                                 }
                             }
                         }
@@ -434,8 +391,9 @@ impl UsageService {
                         CodexEvent::Disconnected => {
                             log::warn!("Codex app-server disconnected");
                             client = None;
+                            next_connect_at = Instant::now() + Duration::from_secs(30);
                             let mut s = state.write().await;
-                            if s.monitor_state == MonitorState::Monitoring {
+                            if s.monitor_state != MonitorState::Dormant {
                                 s.monitor_state = MonitorState::Dormant;
                                 s.error_message = None;
                                 alert_states.clear();
@@ -452,9 +410,9 @@ impl UsageService {
 
                 // Account usage changes less frequently than the live rate-limit windows.
                 _ = account_usage_interval.tick() => {
-                    if state.read().await.monitor_state == MonitorState::Monitoring {
+                    if client.is_some() {
                         if let Some(c) = &client {
-                            if let Err(e) = refresh_account_usage(c, &state, &app_handle).await {
+                            if let Err(e) = refresh_account_usage(c, &db_clone, &state, &app_handle).await {
                                 log::warn!("Failed to refresh account token usage: {}", e);
                             }
                         }
@@ -464,7 +422,7 @@ impl UsageService {
                 // Internal events
                 Some(_) = internal_rx.recv() => {
                     log::info!("Manual refresh requested");
-                    if state.read().await.monitor_state == MonitorState::Monitoring {
+                    if client.is_some() {
                         if let Some(c) = &client {
                             match c.read_rate_limits().await {
                                 Ok(snapshot) => {
@@ -498,7 +456,7 @@ impl UsageService {
                                 }
                             }
 
-                            if let Err(e) = refresh_account_usage(c, &state, &app_handle).await {
+                            if let Err(e) = refresh_account_usage(c, &db_clone, &state, &app_handle).await {
                                 log::warn!("Failed to refresh account token usage: {}", e);
                             }
                         }
@@ -544,6 +502,8 @@ fn persist_quota_samples(db: &crate::db::Db, snapshot: &UsageSnapshot) {
 /// Updates state with a new snapshot while stabilizing `resets_at` when used_percent == 0
 /// so that rolling placeholder timestamps from periodic polls don't reset the timer display.
 fn update_snapshot_state(s: &mut UsageState, mut new_snapshot: UsageSnapshot) -> UsageSnapshot {
+    s.monitor_state = MonitorState::Monitoring;
+    s.error_message = None;
     if let Some(existing) = &s.snapshot {
         for new_win in &mut new_snapshot.windows {
             if new_win.used_percent == 0.0 {
@@ -639,10 +599,13 @@ pub(crate) async fn refresh_token_totals(
 
 async fn refresh_account_usage(
     client: &CodexClient,
+    db: &crate::db::Db,
     state: &RwLock<UsageState>,
     app_handle: &tauri::AppHandle,
 ) -> Result<(), String> {
-    let usage = client.read_account_usage().await?;
+    let mut usage = client.read_account_usage().await?;
+    usage.fetched_at = Some(chrono::Utc::now().timestamp());
+    db.record_account_usage(&usage)?;
     {
         let mut s = state.write().await;
         s.account_usage = Some(usage.clone());
@@ -777,5 +740,27 @@ mod tests {
             token_window_bounds(None, "weekly", 7 * 24 * 3600, now),
             (now - 7 * 24 * 3600, now)
         );
+    }
+
+    #[test]
+    fn account_quota_is_recorded_without_local_clients_or_invented_tokens() {
+        let db = crate::db::Db::test_db(None);
+        let mut state = UsageState::default();
+        assert!(state.detected_clients.is_empty());
+        let snapshot = snapshot_with_window(UsageWindow {
+            source: "primary".into(),
+            name: "fiveHour".into(),
+            duration_minutes: Some(300),
+            used_percent: 35.0,
+            remaining_percent: 65.0,
+            resets_at: chrono::DateTime::from_timestamp(1_800_000_000, 0).map(|dt| dt.to_rfc3339()),
+        });
+        persist_quota_samples(&db, &snapshot);
+        update_snapshot_state(&mut state, snapshot);
+        assert_eq!(state.monitor_state, MonitorState::Monitoring);
+        let history = db.get_limit_history(None, None, 0, 1_800_000_001).unwrap();
+        assert_eq!(history.periods.len(), 1);
+        assert_eq!(history.periods[0].used_percent, 35.0);
+        assert_eq!(history.periods[0].tokens.total_tokens, 0);
     }
 }

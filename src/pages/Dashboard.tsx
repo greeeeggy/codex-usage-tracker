@@ -8,6 +8,7 @@ import { RecentEventsCard } from '../components/RecentEventsCard';
 import { LimitSummaryCard } from '../components/LimitSummaryCard';
 import { TokenUsageSummary } from '../components/TokenUsageSummary';
 import { LimitPeriodHistory } from '../components/LimitPeriodHistory';
+import { AccountUsageCoverage } from '../components/AccountUsageCoverage';
 import { PricingCatalogCard } from '../components/PricingCatalogCard';
 import { ChatSessionHistory } from '../components/ChatSessionHistory';
 import { Activity, RefreshCw, Layers, History as HistoryIcon, Gauge, MonitorDot, Lightbulb, Settings as SettingsIcon, Cpu } from 'lucide-react';
@@ -312,6 +313,7 @@ export function Dashboard() {
               </div>
             ))}
             <LimitPeriodHistory />
+            <AccountUsageCoverage />
           </div>
         );
 

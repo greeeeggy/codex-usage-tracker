@@ -79,6 +79,12 @@ export interface DailyUsageBucket {
 export interface AccountUsage {
   summary: AccountUsageSummary | null;
   dailyUsageBuckets: DailyUsageBucket[] | null;
+  fetchedAt?: number | null;
+}
+
+export interface AccountDayPage {
+  days: { startDate: string; tokens: number; observedAt: number }[];
+  total: number;
 }
 
 export interface QuotaSampleRow {

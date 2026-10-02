@@ -233,6 +233,7 @@ pub fn run() {
             commands::get_pricing,
             commands::refresh_pricing,
             commands::get_limit_history,
+            commands::get_account_usage_days,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

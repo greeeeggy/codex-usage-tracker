@@ -137,6 +137,7 @@ export const useUsageStore = create<UsageState>((set, get) => ({
         await listen('usage-updated', (event: Event<UsageSnapshot>) => {
           console.log('Usage updated:', event.payload);
           set({ snapshot: event.payload });
+          void invoke<MonitorStateResponse>('get_monitor_state').then(res => set({ monitorState: res.state, errorMessage: res.errorMessage }));
           loadExtras(); // Refresh derived metrics on usage update
         });
 

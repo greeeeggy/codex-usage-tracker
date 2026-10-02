@@ -136,10 +136,16 @@ fn import_batch(db: &Db, path: &Path) -> Result<Option<LiveContext>, String> {
             continue;
         };
         let captured = time.timestamp();
-        if let Some(snapshot) =
-            crate::codex_client::snapshot_from_rollout(&payload["rate_limits"], timestamp)
-        {
-            crate::limit_history::persist_snapshot(db, &snapshot);
+        let rate_snapshot =
+            crate::codex_client::snapshot_from_rollout(&payload["rate_limits"], timestamp).filter(
+                |s| {
+                    s.windows
+                        .iter()
+                        .any(|w| w.duration_minutes.is_some_and(|m| m > 0))
+                },
+            );
+        if let Some(snapshot) = &rate_snapshot {
+            crate::limit_history::persist_snapshot(db, snapshot);
         }
         let Some(total) = payload
             .pointer("/info/total_token_usage")
@@ -156,14 +162,10 @@ fn import_batch(db: &Db, path: &Path) -> Result<Option<LiveContext>, String> {
         let total = DetailedTokenUsage::from_value(total);
         let last = DetailedTokenUsage::from_value(last);
         if let Some(usage) = delta(checkpoint.previous.as_ref(), &total, &last) {
-            let limit_id = payload
-                .pointer("/rate_limits/limit_id")
-                .and_then(Value::as_str)
-                .unwrap_or(if payload["rate_limits"].is_object() {
-                    "codex"
-                } else {
-                    "unattributed"
-                })
+            let limit_id = rate_snapshot
+                .as_ref()
+                .map(|s| s.limit_id.as_deref().unwrap_or("codex"))
+                .unwrap_or("unattributed")
                 .to_string();
             pending.push((
                 TokenEvent {

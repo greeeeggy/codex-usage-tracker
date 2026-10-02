@@ -234,15 +234,16 @@ impl Db {
                 offset INTEGER NOT NULL,
                 state_json TEXT NOT NULL
             );
-            CREATE VIEW IF NOT EXISTS counted_token_events AS
+            CREATE TABLE IF NOT EXISTS account_usage_days (
+                start_date TEXT PRIMARY KEY,
+                tokens INTEGER NOT NULL,
+                observed_at INTEGER NOT NULL
+            );
+            DROP VIEW IF EXISTS counted_token_events;
+            CREATE VIEW counted_token_events AS
                 SELECT account_key, captured_at, thread_id, input_tokens, cached_input_tokens,
                        output_tokens, reasoning_tokens, total_tokens FROM window_token_events
-                UNION ALL
-                SELECT account_key, captured_at, thread_id, input_tokens, cached_input_tokens,
-                       output_tokens, reasoning_tokens, total_tokens FROM token_events AS legacy
-                WHERE legacy.event_type = 'local_rollout' AND NOT EXISTS (
-                    SELECT 1 FROM rollout_checkpoints WHERE file_key = legacy.thread_id
-                );
+                WHERE limit_id <> 'unattributed';
             "
         ).map_err(|e| format!("Failed to initialize schema: {}", e))?;
 
@@ -268,6 +269,59 @@ impl Db {
             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
             params![key, json, chrono::Utc::now().timestamp()]).map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub fn record_account_usage(
+        &self,
+        usage: &crate::codex_client::AccountUsage,
+    ) -> Result<(), String> {
+        let captured = usage
+            .fetched_at
+            .unwrap_or_else(|| chrono::Utc::now().timestamp());
+        let json = serde_json::to_string(usage).map_err(|e| e.to_string())?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        for day in usage.daily_usage_buckets.as_deref().unwrap_or(&[]) {
+            if day.tokens < 0
+                || chrono::NaiveDate::parse_from_str(&day.start_date, "%Y-%m-%d").is_err()
+            {
+                continue;
+            }
+            // Server buckets are totals, not increments. Repeated polls replace
+            // the observation; they must never add local usage a second time.
+            tx.execute("INSERT INTO account_usage_days VALUES (?1, ?2, ?3)
+                ON CONFLICT(start_date) DO UPDATE SET tokens = excluded.tokens, observed_at = excluded.observed_at
+                WHERE excluded.observed_at >= observed_at", params![day.start_date, day.tokens, captured])
+                .map_err(|e| e.to_string())?;
+        }
+        tx.execute("INSERT INTO settings VALUES ('account_usage_cache', ?1, ?2)
+            ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at
+            WHERE excluded.updated_at >= updated_at", params![json, captured]).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    pub fn get_account_usage_days(
+        &self,
+        offset: i64,
+    ) -> Result<crate::limit_history::AccountDayPage, String> {
+        let conn = self.conn.lock().unwrap();
+        let total = conn
+            .query_row("SELECT COUNT(*) FROM account_usage_days", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare("SELECT start_date, tokens, observed_at FROM account_usage_days ORDER BY start_date DESC LIMIT 100 OFFSET ?1")
+            .map_err(|e| e.to_string())?;
+        let days = stmt
+            .query_map([offset.max(0)], |r| {
+                Ok(crate::limit_history::AccountDay {
+                    start_date: r.get(0)?,
+                    tokens: r.get(1)?,
+                    observed_at: r.get(2)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())?;
+        Ok(crate::limit_history::AccountDayPage { days, total })
     }
 
     pub fn record_limit_period(
@@ -1133,7 +1187,7 @@ mod limit_tests {
     }
 
     #[test]
-    fn older_rollout_totals_are_preserved_until_their_file_is_replayed() {
+    fn unscoped_legacy_totals_are_retained_but_not_treated_as_shared_limit_usage() {
         let db = Db::test_db(None);
         let legacy = event("old", 1_799_999_000, 100);
         db.insert_token_event(&legacy).unwrap();
@@ -1142,7 +1196,7 @@ mod limit_tests {
                 .unwrap()
                 .all_time_recorded
                 .total_tokens,
-            100
+            0
         );
         db.save_rollout_batch(
             "test-rollout",
@@ -1157,6 +1211,69 @@ mod limit_tests {
                 .all_time_recorded
                 .total_tokens,
             100
+        );
+        assert_eq!(
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM token_events", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn unassigned_requests_do_not_enter_shared_limit_token_totals() {
+        let db = Db::test_db(None);
+        db.save_rollout_batch(
+            "unknown",
+            10,
+            "{}",
+            &[(event("unknown", 1_799_999_000, 999), "unattributed".into())],
+        )
+        .unwrap();
+        assert_eq!(
+            db.get_token_totals("default", 0, 0, i64::MAX, 0, i64::MAX)
+                .unwrap()
+                .all_time_recorded
+                .total_tokens,
+            0
+        );
+    }
+
+    #[test]
+    fn server_day_totals_replace_observations_and_survive_missing_buckets() {
+        let db = Db::test_db(None);
+        let usage = |captured, tokens| crate::codex_client::AccountUsage {
+            summary: None,
+            fetched_at: Some(captured),
+            daily_usage_buckets: Some(vec![crate::codex_client::DailyUsageBucket {
+                start_date: "2026-10-02".into(),
+                tokens,
+            }]),
+        };
+        db.record_account_usage(&usage(100, 200)).unwrap();
+        db.record_account_usage(&usage(101, 250)).unwrap();
+        db.record_account_usage(&usage(101, 250)).unwrap();
+        db.record_account_usage(&usage(99, 50)).unwrap();
+        db.record_account_usage(&crate::codex_client::AccountUsage {
+            fetched_at: Some(102),
+            ..Default::default()
+        })
+        .unwrap();
+        let page = db.get_account_usage_days(0).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.days[0].tokens, 250);
+        assert_eq!(page.days[0].observed_at, 101);
+        // Account-wide totals already include local activity; they are kept
+        // separately and are never added to request-level window totals.
+        assert_eq!(
+            db.get_token_totals("default", 0, 0, i64::MAX, 0, i64::MAX)
+                .unwrap()
+                .all_time_recorded
+                .total_tokens,
+            0
         );
     }
 }

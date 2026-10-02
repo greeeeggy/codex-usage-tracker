@@ -23,6 +23,21 @@ pub struct LimitHistoryPage {
     pub total: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountDay {
+    pub start_date: String,
+    pub tokens: i64,
+    pub observed_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountDayPage {
+    pub days: Vec<AccountDay>,
+    pub total: i64,
+}
+
 pub fn persist_snapshot(db: &crate::db::Db, snapshot: &crate::codex_client::UsageSnapshot) {
     let captured = chrono::DateTime::parse_from_rfc3339(&snapshot.captured_at)
         .map(|t| t.timestamp())
