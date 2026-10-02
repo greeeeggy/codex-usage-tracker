@@ -15,6 +15,8 @@ use tokio::sync::RwLock;
 struct Checkpoint {
     previous: Option<DetailedTokenUsage>,
     model: Option<String>,
+    #[serde(default)]
+    turn_id: Option<String>,
 }
 
 struct LiveContext {
@@ -103,7 +105,7 @@ fn import_batch(db: &Db, path: &Path) -> Result<Option<LiveContext>, String> {
         }
         let row_offset = offset;
         offset += count as u64;
-        if !["token_count", "turn_context"]
+        if !["token_count", "turn_context", "task_started"]
             .iter()
             .any(|s| line.contains(s))
         {
@@ -115,6 +117,13 @@ fn import_batch(db: &Db, path: &Path) -> Result<Option<LiveContext>, String> {
         let payload = &row["payload"];
         if row["type"] == "turn_context" {
             checkpoint.model = payload["model"].as_str().map(str::to_owned);
+            if let Some(turn) = payload["turn_id"].as_str() {
+                checkpoint.turn_id = Some(turn.to_owned());
+            }
+            continue;
+        }
+        if row["type"] == "event_msg" && payload["type"] == "task_started" {
+            checkpoint.turn_id = payload["turn_id"].as_str().map(str::to_owned);
             continue;
         }
         if row["type"] != "event_msg" || payload["type"] != "token_count" {
@@ -158,12 +167,28 @@ fn import_batch(db: &Db, path: &Path) -> Result<Option<LiveContext>, String> {
                 .to_string();
             pending.push((
                 TokenEvent {
-                    id: format!("{key}:{row_offset}"),
+                    // Forks can copy a parent's token rows and rewrite their
+                    // timestamps. A shared turn/counter identity counts that
+                    // request once across both files.
+                    id: checkpoint.turn_id.as_ref().map_or_else(
+                        || format!("{key}:{row_offset}"),
+                        |turn| {
+                            format!(
+                                "turn:{turn}:{}:{}:{}:{}:{}:{}",
+                                total.input_tokens,
+                                total.cached_input_tokens,
+                                total.cache_write_input_tokens,
+                                total.output_tokens,
+                                total.reasoning_tokens,
+                                total.total_tokens
+                            )
+                        },
+                    ),
                     account_key: "default".into(),
                     captured_at: captured,
                     client_type: "local_session".into(),
                     thread_id: Some(key.into()),
-                    turn_id: None,
+                    turn_id: checkpoint.turn_id.clone(),
                     project_path_hash: None,
                     model: checkpoint.model.clone(),
                     input_tokens: usage.input_tokens,
@@ -212,7 +237,7 @@ pub async fn run(db: Arc<Db>, app: tauri::AppHandle, state: Arc<RwLock<UsageStat
         if let Some(root) = dir.parent() {
             files(&root.join("archived_sessions"), &mut paths);
         }
-        paths.sort();
+        paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
         let mut changed = false;
         for path in paths {
             let batch_db = db.clone();
@@ -346,5 +371,86 @@ mod replay_tests {
             2
         );
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn copied_fork_history_counts_once_even_when_child_is_imported_first() {
+        let turn = uuid::Uuid::new_v4().to_string();
+        let context = |id: &str| {
+            serde_json::json!({"type": "turn_context",
+            "payload": {"turn_id": id, "model": "future-model"}})
+            .to_string()
+        };
+        let parent = std::env::temp_dir().join(format!("rollout-{}.jsonl", uuid::Uuid::new_v4()));
+        let child = std::env::temp_dir().join(format!("rollout-{}.jsonl", uuid::Uuid::new_v4()));
+        let independent =
+            std::env::temp_dir().join(format!("rollout-{}.jsonl", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &parent,
+            format!(
+                "{}\n{}\n",
+                context(&turn),
+                row("2027-01-15T07:59:00Z", 100, 100)
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &child,
+            format!(
+                "{}\n{}\n{}\n{}\n",
+                context(&turn),
+                row("2027-01-15T07:59:20Z", 100, 100),
+                context(&uuid::Uuid::new_v4().to_string()),
+                row("2027-01-15T07:59:30Z", 150, 50)
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &independent,
+            format!(
+                "{}\n{}\n",
+                context(&uuid::Uuid::new_v4().to_string()),
+                row("2027-01-15T07:59:40Z", 100, 100)
+            ),
+        )
+        .unwrap();
+        for child_first in [true, false] {
+            let db = Db::test_db(None);
+            let order = if child_first {
+                [&child, &parent]
+            } else {
+                [&parent, &child]
+            };
+            for path in order {
+                import_batch(&db, path).unwrap();
+            }
+            import_batch(&db, &independent).unwrap();
+            import_batch(&db, &child).unwrap();
+            assert_eq!(
+                db.get_token_totals("default", 0, 0, i64::MAX, 0, i64::MAX)
+                    .unwrap()
+                    .all_time_recorded
+                    .total_tokens,
+                250
+            );
+            // A copied row's rewritten timestamp cannot move the original
+            // request into a later quota period.
+            assert_eq!(
+                db.get_token_totals("default", 0, 0, 1_799_999_950, 0, i64::MAX)
+                    .unwrap()
+                    .five_hour_window
+                    .total_tokens,
+                100
+            );
+            assert!(db
+                .get_limit_history(None, None, 0, 1_800_000_001)
+                .unwrap()
+                .periods
+                .iter()
+                .all(|period| period.tokens.total_tokens == 250));
+        }
+        for path in [parent, child, independent] {
+            std::fs::remove_file(path).unwrap();
+        }
     }
 }

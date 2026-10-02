@@ -436,7 +436,12 @@ impl Db {
         for (event, limit_id) in events {
             tx.execute(
                 "INSERT INTO window_token_events VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-                ON CONFLICT(id) DO NOTHING",
+                ON CONFLICT(id) DO UPDATE SET
+                    limit_id = excluded.limit_id, thread_id = excluded.thread_id,
+                    captured_at = excluded.captured_at, input_tokens = excluded.input_tokens,
+                    cached_input_tokens = excluded.cached_input_tokens, output_tokens = excluded.output_tokens,
+                    reasoning_tokens = excluded.reasoning_tokens, total_tokens = excluded.total_tokens
+                WHERE excluded.captured_at < window_token_events.captured_at",
                 params![
                     event.id,
                     event.account_key,

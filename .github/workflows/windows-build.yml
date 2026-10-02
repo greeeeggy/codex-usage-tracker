@@ -27,13 +27,13 @@ jobs:
       - name: Build frontend and check types
         run: npm run build
       - name: Test pricing, log replay, and persisted limit windows
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - name: Install test browser
         run: npx playwright install chromium
       - name: Check Limits and pricing screens
         run: npx playwright test
       - name: Build Windows executable and installer
-        run: npm run tauri build -- --bundles nsis
+        run: npm run tauri build -- --bundles nsis -- --locked
       - name: Prepare verified downloads
         shell: pwsh
         run: |
