@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -169,16 +171,22 @@ impl CodexClient {
     /// Start the Codex app-server process and begin communication
     pub async fn start(&mut self) -> Result<(), String> {
         let codex_path = find_codex_executable()?;
-        log::info!("[CODEX] Found executable: {}", codex_path);
+        log::info!("[CODEX] Found executable: {}", codex_path.display());
 
         let mut child = Command::new(&codex_path)
-            .args(["app-server", "--stdio"])
+            .args(["app-server", "--listen", "stdio://"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .creation_flags(0x08000000) // CREATE_NO_WINDOW on Windows
             .spawn()
-            .map_err(|e| format!("Failed to start codex app-server: {}", e))?;
+            .map_err(|e| {
+                format!(
+                    "Failed to start codex app-server at {}: {}",
+                    codex_path.display(),
+                    e
+                )
+            })?;
 
         log::info!("[CODEX] Spawned codex app-server (PID: {})", child.id());
 
@@ -463,29 +471,98 @@ impl CodexClient {
     }
 }
 
-/// Find the codex executable on the system
-fn find_codex_executable() -> Result<String, String> {
-    // Try "codex" directly (should be on PATH if installed globally)
-    if Command::new("codex")
-        .arg("--version")
-        .creation_flags(0x08000000)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok()
-    {
-        return Ok("codex".to_string());
+/// Resolve native binaries rather than npm's .cmd shim, which requires cmd.exe
+/// and fails with error 740 when that shell is configured to run as administrator.
+fn codex_executable_candidates(appdata: Option<&OsStr>, path: Option<&OsStr>) -> Vec<PathBuf> {
+    let mut prefixes = Vec::new();
+    if let Some(appdata) = appdata {
+        prefixes.push(Path::new(appdata).join("npm"));
+    }
+    if let Some(path) = path {
+        prefixes.extend(std::env::split_paths(path));
     }
 
-    // Try common npm global paths on Windows
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        let npm_path = format!("{}\\npm\\codex.cmd", appdata);
-        if std::path::Path::new(&npm_path).exists() {
-            return Ok(npm_path);
+    let (platform_package, target) = if cfg!(target_arch = "aarch64") {
+        ("codex-win32-arm64", "aarch64-pc-windows-msvc")
+    } else {
+        ("codex-win32-x64", "x86_64-pc-windows-msvc")
+    };
+    let mut candidates = Vec::new();
+    for prefix in &prefixes {
+        let scope = prefix.join("node_modules").join("@openai");
+        let package = scope.join("codex");
+        // Current npm installs nest the platform package under @openai/codex.
+        // Hoisted dependencies and older bundled-vendor releases also work.
+        for vendor in [
+            package
+                .join("node_modules")
+                .join("@openai")
+                .join(platform_package)
+                .join("vendor"),
+            scope.join(platform_package).join("vendor"),
+            package.join("vendor"),
+        ] {
+            for binary_dir in ["bin", "codex"] {
+                let candidate = vendor.join(target).join(binary_dir).join("codex.exe");
+                if !candidates.contains(&candidate) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+    }
+    // Standalone CLI installations remain supported, using an absolute path.
+    for prefix in prefixes {
+        let candidate = prefix.join("codex.exe");
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+fn find_codex_executable() -> Result<PathBuf, String> {
+    let appdata = std::env::var_os("APPDATA");
+    let path = std::env::var_os("PATH");
+    let mut failures = Vec::new();
+    for candidate in codex_executable_candidates(appdata.as_deref(), path.as_deref()) {
+        if !candidate.is_file() {
+            continue;
+        }
+        let candidate = match candidate.canonicalize() {
+            Ok(path) => path,
+            Err(error) => {
+                failures.push(format!("{}: {}", candidate.display(), error));
+                continue;
+            }
+        };
+        match Command::new(&candidate)
+            .arg("--version")
+            .creation_flags(0x08000000)
+            .stdin(Stdio::null())
+            .output()
+        {
+            Ok(output)
+                if output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .trim()
+                        .starts_with("codex-cli ") =>
+            {
+                return Ok(candidate);
+            }
+            Ok(output) => failures.push(format!(
+                "{} did not report a Codex CLI version (exit {})",
+                candidate.display(),
+                output.status
+            )),
+            Err(error) => failures.push(format!("{}: {}", candidate.display(), error)),
         }
     }
 
-    Err("Codex CLI not found. Please install it with: npm install -g @openai/codex".to_string())
+    let mut message = "No usable Codex CLI executable found. Install or repair it with: npm install -g @openai/codex".to_string();
+    if !failures.is_empty() {
+        message.push_str(&format!(". {}", failures.join("; ")));
+    }
+    Err(message)
 }
 
 /// Generate a simple incrementing ID
@@ -606,6 +683,79 @@ fn normalize_window(source: &str, raw: &RawWindow) -> UsageWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovers_native_npm_binaries_with_spaces_and_ignores_cmd_shims() {
+        let root = std::env::temp_dir().join(format!("codex meter {}", uuid::Uuid::new_v4()));
+        let appdata = root.join("AppData").join("Roaming");
+        let prefix = appdata.join("npm");
+        let scope = prefix.join("node_modules").join("@openai");
+        let (platform, target) = if cfg!(target_arch = "aarch64") {
+            ("codex-win32-arm64", "aarch64-pc-windows-msvc")
+        } else {
+            ("codex-win32-x64", "x86_64-pc-windows-msvc")
+        };
+        let paths = [
+            scope
+                .join("codex")
+                .join("node_modules")
+                .join("@openai")
+                .join(platform)
+                .join("vendor")
+                .join(target)
+                .join("bin")
+                .join("codex.exe"),
+            scope
+                .join(platform)
+                .join("vendor")
+                .join(target)
+                .join("bin")
+                .join("codex.exe"),
+            scope
+                .join("codex")
+                .join("vendor")
+                .join(target)
+                .join("codex")
+                .join("codex.exe"),
+        ];
+        std::fs::create_dir_all(&prefix).unwrap();
+        std::fs::write(prefix.join("codex.cmd"), "@echo this shim must not run").unwrap();
+        for native in &paths {
+            std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+            std::fs::write(native, []).unwrap();
+            let candidates = codex_executable_candidates(Some(appdata.as_os_str()), None);
+            assert_eq!(candidates.iter().find(|path| path.is_file()), Some(native));
+            assert!(candidates
+                .iter()
+                .all(|path| path.extension() == Some(OsStr::new("exe"))));
+            std::fs::remove_file(native).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "Requires the official Codex CLI; exercised by the Windows build workflow"]
+    async fn initializes_native_app_server_without_command_prompt() {
+        let executable = find_codex_executable().expect("native Codex CLI should be installed");
+        assert_eq!(executable.extension(), Some(OsStr::new("exe")));
+        assert!(executable.is_absolute());
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let mut client = CodexClient::new(event_tx);
+        client
+            .start()
+            .await
+            .expect("native app-server should initialize");
+        client.stop();
+        timeout(Duration::from_secs(15), async {
+            while let Some(event) = event_rx.recv().await {
+                if matches!(event, CodexEvent::Disconnected) {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("app-server should exit after stdin closes");
+    }
 
     #[test]
     fn normalizes_five_hour_and_weekly_windows() {

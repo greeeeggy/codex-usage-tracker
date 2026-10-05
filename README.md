@@ -24,6 +24,8 @@ npm install -g @openai/codex
 codex login
 ```
 
+On Windows, Meter launches the native `codex.exe` directly from the npm installation or PATH. It supports current nested and hoisted platform packages and older bundled binaries. This avoids the npm command shim and fixes error 740 when Command Prompt is configured to run as administrator. Existing Windows compatibility settings do not need to change.
+
 ## Running locally
 
 ```bash

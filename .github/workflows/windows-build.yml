@@ -28,6 +28,15 @@ jobs:
         run: npm run build
       - name: Test pricing, log replay, and persisted limit windows
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Install official CLI for native-launch regression check
+        run: npm install --global @openai/codex@0.151.0
+      - name: Initialize app-server without Command Prompt
+        shell: pwsh
+        run: |
+          $env:ComSpec = Join-Path $env:RUNNER_TEMP 'unavailable-command-prompt.exe'
+          $env:CODEX_HOME = Join-Path $env:RUNNER_TEMP 'codex-meter-cli-check'
+          cargo test --locked --manifest-path src-tauri/Cargo.toml initializes_native_app_server_without_command_prompt -- --ignored
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Install test browser
         run: npx playwright install chromium
       - name: Check Limits and pricing screens
