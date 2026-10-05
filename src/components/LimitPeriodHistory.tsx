@@ -58,7 +58,7 @@ export function LimitPeriodHistory() {
         </div>
       </div>
       <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
-        Completed periods stay saved after resets and restarts. Local tokens cover requests with shared-limit attribution in this computer’s Codex logs.
+        One summary per limit cycle. Completed cycles stay saved after resets and restarts. Total tokens cover requests with shared-limit attribution in this computer’s Codex logs.
         Account quota includes Work, Codex, web, cloud, and other clients sharing the allowance. Exact remote tokens per period are unavailable.
         Five-hour and weekly totals overlap; do not add them together.
       </p>
@@ -66,25 +66,22 @@ export function LimitPeriodHistory() {
       <div className="overflow-x-auto">
         <table className="w-full text-sm text-left" aria-label="Limit period token history" aria-busy={loading}>
           <thead style={{ color: 'var(--text-muted)' }}>
-            <tr>{['Limit / window', 'Start', 'Reset', 'Status', 'Local tokens', 'Input', 'Cached input', 'Output', 'Observed quota'].map(h => <th key={h} className="p-3 whitespace-nowrap">{h}</th>)}</tr>
+            <tr>{['Limit / window', 'Start', 'Reset', 'Total tokens', 'Observed quota consumed'].map(h => <th key={h} className="p-3 whitespace-nowrap">{h}</th>)}</tr>
           </thead>
           <tbody style={{ color: 'var(--text-primary)' }}>
             {page.periods.map(period => (
               <tr key={period.id} className="border-t border-white/5">
                 <td className="p-3 whitespace-nowrap"><strong>{period.limitName ?? period.limitId}</strong><br />
                   <span style={{ color: 'var(--text-muted)' }}>{period.windowKind === 'fiveHour' ? '5-hour' : period.windowKind === 'weekly' ? 'Weekly' : period.windowKind}</span>
+                  <span className="ml-2 text-xs capitalize" style={{ color: 'var(--text-muted)' }}>{period.status}</span>
                 </td>
                 <td className="p-3 whitespace-nowrap">{date(period.startedAt)}</td>
                 <td className="p-3 whitespace-nowrap">{date(period.resetsAt)}</td>
-                <td className="p-3 capitalize">{period.status}</td>
-                <td className="p-3 font-mono font-semibold">{count(period.tokens.totalTokens)}</td>
-                <td className="p-3 font-mono">{count(period.tokens.inputTokens)}</td>
-                <td className="p-3 font-mono">{count(period.tokens.cachedInputTokens)}</td>
-                <td className="p-3 font-mono" title={`Reasoning tokens (included): ${count(period.tokens.reasoningTokens ?? 0)}`}>{count(period.tokens.outputTokens)}</td>
+                <td className="p-3 font-mono font-semibold" title={`Input: ${count(period.tokens.inputTokens)} · Cached input (included): ${count(period.tokens.cachedInputTokens)} · Output: ${count(period.tokens.outputTokens)} · Reasoning (included in output): ${count(period.tokens.reasoningTokens ?? 0)}`}>{count(period.tokens.totalTokens)}</td>
                 <td className="p-3" title={`Last observed ${date(period.lastObservedAt)}`}>{period.usedPercent.toFixed(1)}%</td>
               </tr>
             ))}
-            {!loading && !error && page.periods.length === 0 && <tr><td colSpan={9} className="p-8 text-center" style={{ color: 'var(--text-muted)' }}>No recorded periods match. Existing logs are imported automatically.</td></tr>}
+            {!loading && !error && page.periods.length === 0 && <tr><td colSpan={5} className="p-8 text-center" style={{ color: 'var(--text-muted)' }}>No recorded periods match. Existing logs are imported automatically.</td></tr>}
           </tbody>
         </table>
       </div>

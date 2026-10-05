@@ -124,7 +124,7 @@ impl Db {
     }
 
     fn initialize_schema(&self) -> Result<(), String> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
 
         conn.execute_batch(
             "
@@ -216,6 +216,17 @@ impl Db {
                 used_percent REAL NOT NULL,
                 UNIQUE(account_key, limit_id, window_kind, resets_at)
             );
+            CREATE TABLE IF NOT EXISTS limit_observations (
+                account_key TEXT NOT NULL,
+                limit_id TEXT NOT NULL,
+                limit_name TEXT,
+                window_kind TEXT NOT NULL,
+                duration_seconds INTEGER NOT NULL,
+                resets_at INTEGER NOT NULL,
+                captured_at INTEGER NOT NULL,
+                used_percent REAL NOT NULL,
+                PRIMARY KEY(account_key, limit_id, window_kind, captured_at, resets_at)
+            );
             CREATE TABLE IF NOT EXISTS window_token_events (
                 id TEXT PRIMARY KEY,
                 account_key TEXT NOT NULL,
@@ -247,6 +258,31 @@ impl Db {
             "
         ).map_err(|e| format!("Failed to initialize schema: {}", e))?;
 
+        // Retain the original observations before replacing duplicate summary
+        // rows. Migration and its marker commit together and are restart-safe.
+        let migrated = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM settings WHERE key = 'limit_summary_migrated_v1')",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !migrated {
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            tx.execute_batch("INSERT OR IGNORE INTO limit_observations
+                SELECT account_key, 'codex', NULL, window_kind, duration_minutes * 60, resets_at, captured_at, used_percent
+                FROM quota_samples WHERE duration_minutes > 0 AND duration_minutes <= 525600 AND resets_at > 0;
+                INSERT OR IGNORE INTO limit_observations
+                SELECT account_key, limit_id, limit_name, window_kind, resets_at - started_at, resets_at, first_observed_at, 0
+                FROM limit_period_history;
+                INSERT OR REPLACE INTO limit_observations
+                SELECT account_key, limit_id, limit_name, window_kind, resets_at - started_at, resets_at, last_observed_at, used_percent
+                FROM limit_period_history;
+                INSERT OR REPLACE INTO settings VALUES ('limit_summary_migrated_v1', 'true', 0);
+                INSERT OR REPLACE INTO settings VALUES ('limit_summary_dirty', 'true', 0);")
+                .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
 
@@ -337,45 +373,71 @@ impl Db {
         if minutes == 0 || minutes > 525_600 || reset <= 0 || !used.is_finite() {
             return Ok(());
         }
-        let conn = self.conn.lock().unwrap();
-        // Zero-use responses may slide their placeholder reset on every poll.
-        // Reuse an unexpired empty period until real usage supplies its boundary.
-        let placeholder: Option<(i64, i64)> = conn
-            .query_row(
-                "SELECT id, resets_at FROM limit_period_history
-            WHERE account_key = 'default' AND limit_id = ?1 AND window_kind = ?2
-            AND used_percent = 0 AND resets_at > ?3 AND started_at <= ?3
-            AND NOT EXISTS (SELECT 1 FROM window_token_events e WHERE e.limit_id = limit_period_history.limit_id
-                AND e.captured_at >= limit_period_history.started_at AND e.captured_at < limit_period_history.resets_at)
-            ORDER BY last_observed_at DESC LIMIT 1",
-                params![limit_id, kind, captured],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .ok();
-        let reset = if used == 0.0 {
-            placeholder.map(|(_, end)| end).unwrap_or(reset)
-        } else {
-            reset
-        };
-        if used > 0.0 {
-            if let Some((id, end)) = placeholder {
-                if end != reset {
-                    conn.execute("DELETE FROM limit_period_history WHERE id = ?1", [id])
-                        .map_err(|e| e.to_string())?;
-                }
-            }
-        }
-        conn.execute("INSERT INTO limit_period_history
-            (limit_id, limit_name, window_kind, started_at, resets_at, first_observed_at, last_observed_at, used_percent)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)
-            ON CONFLICT(account_key, limit_id, window_kind, resets_at) DO UPDATE SET
-                first_observed_at = MIN(first_observed_at, excluded.first_observed_at),
-                limit_name = COALESCE(excluded.limit_name, limit_name),
-                used_percent = CASE WHEN excluded.last_observed_at >= last_observed_at THEN excluded.used_percent ELSE used_percent END,
-                last_observed_at = MAX(last_observed_at, excluded.last_observed_at)",
-            params![limit_id, limit_name, kind, reset - minutes as i64 * 60, reset, captured, used.clamp(0.0, 100.0)])
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let changed = tx.execute("INSERT INTO limit_observations
+            (account_key, limit_id, limit_name, window_kind, duration_seconds, resets_at, captured_at, used_percent)
+            VALUES ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(account_key, limit_id, window_kind, captured_at, resets_at) DO UPDATE SET
+                limit_name = COALESCE(excluded.limit_name, limit_name), used_percent = excluded.used_percent
+            WHERE used_percent <> excluded.used_percent OR (excluded.limit_name IS NOT NULL AND limit_name IS NOT excluded.limit_name)",
+            params![limit_id, limit_name, kind, minutes as i64 * 60, reset, captured, used.clamp(0.0, 100.0)])
             .map_err(|e| e.to_string())?;
-        Ok(())
+        if changed > 0 {
+            tx.execute(
+                "INSERT OR REPLACE INTO settings VALUES ('limit_summary_dirty', 'true', 0)",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    fn refresh_limit_summaries(conn: &mut Connection) -> Result<(), String> {
+        let dirty = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM settings WHERE key = 'limit_summary_dirty')",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !dirty {
+            return Ok(());
+        }
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let observations = {
+            let mut stmt = tx.prepare("SELECT account_key, limit_id, limit_name, window_kind, duration_seconds, resets_at, captured_at, used_percent FROM limit_observations")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(crate::limit_history::LimitObservation {
+                        account_key: r.get(0)?,
+                        limit_id: r.get(1)?,
+                        limit_name: r.get(2)?,
+                        window_kind: r.get(3)?,
+                        duration_seconds: r.get(4)?,
+                        resets_at: r.get(5)?,
+                        captured_at: r.get(6)?,
+                        used_percent: r.get(7)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?
+        };
+        tx.execute("DELETE FROM limit_period_history", [])
+            .map_err(|e| e.to_string())?;
+        for period in crate::limit_history::summarize_observations(observations) {
+            tx.execute("INSERT INTO limit_period_history
+                (account_key, limit_id, limit_name, window_kind, started_at, resets_at, first_observed_at, last_observed_at, used_percent)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![period.account_key, period.limit_id, period.limit_name, period.window_kind, period.started_at,
+                    period.resets_at, period.first_observed_at, period.last_observed_at, period.used_percent])
+                .map_err(|e| e.to_string())?;
+        }
+        tx.execute("DELETE FROM settings WHERE key = 'limit_summary_dirty'", [])
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
     }
 
     pub fn backfill_limit_periods(&self) -> Result<(), String> {
@@ -411,7 +473,8 @@ impl Db {
         offset: i64,
         now: i64,
     ) -> Result<crate::limit_history::LimitHistoryPage, String> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
+        Self::refresh_limit_summaries(&mut conn)?;
         let total = conn
             .query_row(
                 "SELECT COUNT(*) FROM limit_period_history WHERE
@@ -1184,6 +1247,240 @@ mod limit_tests {
                 .total,
             2
         );
+    }
+
+    #[test]
+    fn moving_nonzero_reset_estimates_summarize_one_cycle_per_window() {
+        let db = Db::test_db(None);
+        let start = 1_800_000_000;
+        for (kind, minutes) in [("fiveHour", 300), ("weekly", 10080)] {
+            let reset = start + minutes * 60;
+            for (delta, used) in [(0, 10.0), (1, 12.0), (20, 68.0), (120, 65.0)] {
+                db.record_limit_period(
+                    "codex",
+                    None,
+                    kind,
+                    minutes as u64,
+                    reset + delta,
+                    start + 10 + delta,
+                    used,
+                )
+                .unwrap();
+            }
+            let page = db
+                .get_limit_history(None, Some(kind), 0, start + 1000)
+                .unwrap();
+            assert_eq!(page.total, 1);
+            assert_eq!(page.periods[0].started_at, start);
+            assert_eq!(page.periods[0].resets_at, reset);
+            assert_eq!(page.periods[0].used_percent, 65.0);
+            assert_eq!(page.periods[0].last_observed_at, start + 130);
+        }
+        db.save_rollout_batch(
+            "tokens",
+            1,
+            "{}",
+            &[
+                (event("first", start + 10, 100), "codex".into()),
+                (event("second", start + 130, 50), "codex".into()),
+            ],
+        )
+        .unwrap();
+        let page = db.get_limit_history(None, None, 0, start + 1000).unwrap();
+        assert_eq!(page.total, 2);
+        assert!(page.periods.iter().all(|p| p.tokens.total_tokens == 150));
+    }
+
+    #[test]
+    fn shifted_weekly_estimates_do_not_spawn_overlapping_active_cycles() {
+        let db = Db::test_db(None);
+        let start = 1_800_000_000;
+        let week = 604800;
+        // Corrections whose inferred starts precede the previous observation
+        // belong to that cycle, even when the correction spans several days.
+        for day in [0, 1, 3, 4] {
+            db.record_limit_period(
+                "codex",
+                None,
+                "weekly",
+                10080,
+                start + week + day * 86400,
+                start + 5 * 86400 + 10 + day,
+                20.0 + day as f64,
+            )
+            .unwrap();
+        }
+        let page = db
+            .get_limit_history(None, None, 0, start + 5 * 86400)
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.periods[0].resets_at, start + week);
+        db.record_limit_period(
+            "codex",
+            None,
+            "weekly",
+            10080,
+            start + 2 * week,
+            start + week,
+            1.0,
+        )
+        .unwrap();
+        let page = db.get_limit_history(None, None, 0, start + week).unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(
+            page.periods.iter().filter(|p| p.status == "active").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn early_reset_closes_previous_cycle_instead_of_leaving_two_active() {
+        let db = Db::test_db(None);
+        let start = 1_800_000_000;
+        let new_start = start + 2 * 86400;
+        db.record_limit_period(
+            "codex",
+            None,
+            "weekly",
+            10080,
+            start + 604800,
+            start + 10,
+            89.0,
+        )
+        .unwrap();
+        db.record_limit_period(
+            "codex",
+            None,
+            "weekly",
+            10080,
+            new_start + 604800,
+            new_start + 10,
+            4.0,
+        )
+        .unwrap();
+        db.save_rollout_batch(
+            "early-reset",
+            1,
+            "{}",
+            &[
+                (event("before-refresh", new_start - 1, 400), "codex".into()),
+                (event("after-refresh", new_start, 21), "codex".into()),
+            ],
+        )
+        .unwrap();
+        let page = db.get_limit_history(None, None, 0, new_start + 10).unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.periods[1].resets_at, new_start);
+        assert_eq!(page.periods[1].used_percent, 89.0);
+        assert_eq!(page.periods[1].status, "completed");
+        assert_eq!(page.periods[1].tokens.total_tokens, 400);
+        assert_eq!(page.periods[0].started_at, new_start);
+        assert_eq!(page.periods[0].status, "active");
+        assert_eq!(page.periods[0].tokens.total_tokens, 21);
+    }
+
+    #[test]
+    fn late_replay_rebuilds_cycles_and_expired_responses_do_not_create_cycles() {
+        let db = Db::test_db(None);
+        let start = 1_800_000_000;
+        let reset = start + 18000;
+        db.record_limit_period(
+            "codex",
+            None,
+            "fiveHour",
+            300,
+            reset + 100,
+            start + 200,
+            60.0,
+        )
+        .unwrap();
+        db.get_limit_history(None, None, 0, start + 200).unwrap();
+        db.record_limit_period("codex", None, "fiveHour", 300, reset, start + 10, 10.0)
+            .unwrap();
+        db.record_limit_period(
+            "codex",
+            None,
+            "fiveHour",
+            300,
+            reset + 17990,
+            reset + 1,
+            2.0,
+        )
+        .unwrap();
+        db.record_limit_period("codex", None, "fiveHour", 300, reset, reset + 2, 100.0)
+            .unwrap();
+        db.save_rollout_batch(
+            "boundary",
+            1,
+            "{}",
+            &[
+                (event("before", reset - 1, 100), "codex".into()),
+                (event("at", reset, 50), "codex".into()),
+            ],
+        )
+        .unwrap();
+        let page = db.get_limit_history(None, None, 0, reset + 2).unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.periods[0].started_at, reset);
+        assert_eq!(page.periods[0].tokens.total_tokens, 50);
+        assert_eq!(page.periods[1].resets_at, reset);
+        assert_eq!(page.periods[1].tokens.total_tokens, 100);
+        assert_eq!(page.periods[1].used_percent, 60.0);
+    }
+
+    #[test]
+    fn upgrade_repairs_existing_duplicate_history_and_keeps_completed_cycles() {
+        let path =
+            std::env::temp_dir().join(format!("meter-migration-{}.db", uuid::Uuid::new_v4()));
+        let start = 1_800_000_000;
+        let week = 604800;
+        {
+            let db = Db::test_db(Some(&path));
+            {
+                let conn = db.conn.lock().unwrap();
+                conn.execute(
+                    "DELETE FROM settings WHERE key = 'limit_summary_migrated_v1'",
+                    [],
+                )
+                .unwrap();
+                for (delta, captured, used) in [
+                    (0, 10, 20.0),
+                    (1, 20, 21.0),
+                    (30, 50, 25.0),
+                    (60, 3 * 86400 + 10, 89.0),
+                    (week, week + 10, 5.0),
+                ] {
+                    conn.execute("INSERT INTO limit_period_history
+                        (limit_id, window_kind, started_at, resets_at, first_observed_at, last_observed_at, used_percent)
+                        VALUES ('codex', 'weekly', ?1, ?2, ?3, ?3, ?4)",
+                        params![start + delta, start + week + delta, start + captured, used]).unwrap();
+                }
+            }
+            db.save_rollout_batch(
+                "migration",
+                1,
+                "{}",
+                &[
+                    (event("old", start + 50, 400_000_000), "codex".into()),
+                    (event("new", start + week, 21_000_000), "codex".into()),
+                ],
+            )
+            .unwrap();
+        }
+        for _ in 0..2 {
+            let db = Db::test_db(Some(&path));
+            let page = db
+                .get_limit_history(None, None, 0, start + week + 20)
+                .unwrap();
+            assert_eq!(page.total, 2);
+            assert_eq!(page.periods[0].tokens.total_tokens, 21_000_000);
+            assert_eq!(page.periods[1].tokens.total_tokens, 400_000_000);
+            assert_eq!(page.periods[1].used_percent, 89.0);
+            assert_eq!(page.periods[1].status, "completed");
+            assert_eq!(page.periods[1].started_at, start);
+            assert_eq!(page.periods[1].resets_at, start + week);
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

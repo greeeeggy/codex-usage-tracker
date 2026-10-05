@@ -44,6 +44,8 @@ test('Limits retains completed windows, token totals, and bucket filters', async
   await page.getByRole('button', { name: 'Limits', exact: true }).click();
   const table = page.getByRole('table', { name: 'Limit period token history' });
   await expect(table.getByRole('row')).toHaveCount(5);
+  await expect(table.getByRole('columnheader')).toHaveText(['Limit / window', 'Start', 'Reset', 'Total tokens', 'Observed quota consumed']);
+  await expect(table.getByRole('row').filter({ hasText: 'codex' }).filter({ hasText: 'Weekly' })).toHaveCount(1);
   await expect(table.getByText('completed', { exact: true })).toBeVisible();
   await expect(table.getByText('250', { exact: true })).toBeVisible();
   await page.screenshot({ path: 'test-results/limits.png', fullPage: true });
@@ -74,7 +76,7 @@ test('Limits separates server-wide activity from exact local window tokens', asy
   await coverage.getByText('1 saved days · Server-reported tokens').click();
   await expect(page.getByRole('table', { name: 'Server-reported daily tokens' }).getByText('8,000', { exact: true })).toBeVisible();
   const local = page.getByRole('table', { name: 'Limit period token history' });
-  await expect(local.getByRole('columnheader', { name: 'Local tokens', exact: true })).toBeVisible();
+  await expect(local.getByRole('columnheader', { name: 'Total tokens', exact: true })).toBeVisible();
   await expect(local.getByText('9,000', { exact: true })).toHaveCount(0);
   await page.screenshot({ path: 'test-results/account-coverage.png', fullPage: true });
 });
