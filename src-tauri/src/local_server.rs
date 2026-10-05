@@ -56,40 +56,31 @@ pub async fn start_server(
 
 /// GET /api/usage — JSON response for Rainmeter / external consumers
 async fn api_usage(State(state): State<ServerState>) -> impl IntoResponse {
-    let usage = state.usage_state.read().await;
+    Json(usage_payload(&*state.usage_state.read().await)).into_response()
+}
 
-    if let Some(snapshot) = &usage.snapshot {
-        let mut response = serde_json::Map::new();
-        response.insert("account".into(), serde_json::json!(usage.active_account));
-
-        for window in &snapshot.windows {
-            let window_data = serde_json::json!({
+/// Account changes and quota updates use the same payload so external overlays
+/// clear stale usage on sign-out just as the dashboard does.
+pub(crate) fn usage_payload(usage: &UsageState) -> serde_json::Value {
+    let Some(snapshot) = &usage.snapshot else {
+        return serde_json::json!({"account": usage.active_account, "error": "No usage data available", "state": usage.monitor_state});
+    };
+    let mut response = serde_json::Map::new();
+    response.insert("account".into(), serde_json::json!(usage.active_account));
+    for window in &snapshot.windows {
+        response.insert(
+            window.name.clone(),
+            serde_json::json!({
                 "remainingPercent": window.remaining_percent,
                 "usedPercent": window.used_percent,
                 "resetsAt": window.resets_at,
                 "durationMinutes": window.duration_minutes,
-            });
-
-            response.insert(window.name.clone(), window_data);
-        }
-
-        response.insert(
-            "planType".to_string(),
-            serde_json::json!(snapshot.plan_type),
+            }),
         );
-        response.insert(
-            "capturedAt".to_string(),
-            serde_json::json!(snapshot.captured_at),
-        );
-
-        Json(serde_json::Value::Object(response)).into_response()
-    } else {
-        Json(serde_json::json!({
-            "error": "No usage data available",
-            "state": format!("{:?}", usage.monitor_state)
-        }))
-        .into_response()
     }
+    response.insert("planType".into(), serde_json::json!(snapshot.plan_type));
+    response.insert("capturedAt".into(), serde_json::json!(snapshot.captured_at));
+    serde_json::Value::Object(response)
 }
 
 /// GET /overlay — transparent HTML page for OBS Browser Source
@@ -235,7 +226,7 @@ const OBS_OVERLAY_HTML: &str = r#"<!DOCTYPE html>
   }
 
   function renderUsage(data) {
-    statusDot.style.background = '#22c55e';
+    statusDot.style.background = data.error ? '#ef4444' : '#22c55e';
     let html = '';
     let resetText = '';
 

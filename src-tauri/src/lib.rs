@@ -59,42 +59,19 @@ pub fn run() {
             let (sse_tx, _) = tokio::sync::broadcast::channel::<String>(100);
             let sse_tx_clone = sse_tx.clone();
 
-            // Subscribe to usage-updated events to broadcast via SSE
-            let sse_tx_for_events = sse_tx.clone();
-            let state_for_sse = shared_state.clone();
-            let handle = rt.handle().clone();
-            app_handle.listen("usage-updated", move |_event| {
-                let state = state_for_sse.clone();
-                let tx = sse_tx_for_events.clone();
-                handle.spawn(async move {
-                    let s = state.read().await;
-                    if let Some(snapshot) = &s.snapshot {
-                        // Build the simplified JSON for SSE/API consumers
-                        let mut data = serde_json::Map::new();
-                        for window in &snapshot.windows {
-                            data.insert(
-                                window.name.clone(),
-                                serde_json::json!({
-                                    "remainingPercent": window.remaining_percent,
-                                    "usedPercent": window.used_percent,
-                                    "resetsAt": window.resets_at,
-                                    "durationMinutes": window.duration_minutes,
-                                }),
-                            );
-                        }
-                        data.insert(
-                            "planType".to_string(),
-                            serde_json::json!(snapshot.plan_type),
-                        );
-                        data.insert(
-                            "capturedAt".to_string(),
-                            serde_json::json!(snapshot.captured_at),
-                        );
-                        let json = serde_json::to_string(&data).unwrap_or_default();
-                        let _ = tx.send(json);
-                    }
+            for event_name in ["usage-updated", "accounts-updated"] {
+                let state_for_sse = shared_state.clone();
+                let tx_for_sse = sse_tx.clone();
+                let handle = rt.handle().clone();
+                app_handle.listen(event_name, move |_event| {
+                    let state = state_for_sse.clone();
+                    let tx = tx_for_sse.clone();
+                    handle.spawn(async move {
+                        let state = state.read().await;
+                        let _ = tx.send(local_server::usage_payload(&state).to_string());
+                    });
                 });
-            });
+            }
 
             // Build tray menu
             let show_dashboard =

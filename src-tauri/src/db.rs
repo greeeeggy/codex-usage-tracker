@@ -312,6 +312,8 @@ impl Db {
             )
             .map_err(|e| e.to_string())?;
         }
+        tx.execute_batch("CREATE INDEX IF NOT EXISTS idx_quota_account_kind ON quota_samples(account_key,window_kind,captured_at);
+            CREATE INDEX IF NOT EXISTS idx_app_events_account ON app_events(account_key,captured_at);").map_err(|e| e.to_string())?;
         tx.execute("INSERT OR IGNORE INTO settings SELECT 'account_usage_cache:default',value_json,updated_at FROM settings WHERE key = 'account_usage_cache'", []).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(())
