@@ -5,11 +5,14 @@ import { WeeklyLimitCard } from '../components/WeeklyLimitCard';
 import { WeeklyUsageChart } from '../components/HistoryCharts';
 import { MetricCardGrid } from '../components/MetricCardGrid';
 import { RecentEventsCard } from '../components/RecentEventsCard';
-import { LimitSummaryCard } from '../components/LimitSummaryCard';
 import { TokenUsageSummary } from '../components/TokenUsageSummary';
+import { LimitPeriodHistory } from '../components/LimitPeriodHistory';
+import { AccountUsageCoverage } from '../components/AccountUsageCoverage';
+import { PricingCatalogCard } from '../components/PricingCatalogCard';
 import { ChatSessionHistory } from '../components/ChatSessionHistory';
 import { Activity, RefreshCw, Layers, History as HistoryIcon, Gauge, MonitorDot, Lightbulb, Settings as SettingsIcon, Cpu } from 'lucide-react';
 import { formatNumber, formatUsd } from '../utils/cn';
+import { lifetimeCoverage } from '../utils/usageCoverage';
 
 export function Dashboard() {
   const init = useUsageStore((s) => s.init);
@@ -26,6 +29,8 @@ export function Dashboard() {
   const detectedClients = useUsageStore((s) => s.detectedClients);
   const activePage = useUsageStore((s) => s.activePage);
   const setActivePage = useUsageStore((s) => s.setActivePage);
+  const accountKey = useUsageStore(s => s.viewAccountKey);
+  const savedAccount = useUsageStore(s => s.selectedAccountKey !== null && s.selectedAccountKey !== s.activeAccount?.accountKey);
 
   useEffect(() => {
     init();
@@ -49,11 +54,12 @@ export function Dashboard() {
     (w) => w.name === 'fiveHour' || w.durationMinutes === 300
   );
   const currentChatUsage = currentChat?.usage ?? tokenTotals?.currentSession;
+  const lifetime = lifetimeCoverage(accountUsage, tokenTotals, snapshot);
 
   // Error / auth required state
-  if (monitorState === 'error' || monitorState === 'authRequired') {
+  if (!savedAccount && (monitorState === 'error' || monitorState === 'authRequired') && !['limits', 'history', 'settings'].includes(activePage)) {
     return (
-      <div className="h-full p-6">
+      <div className="dashboard-content">
         <DashboardHeader />
         <div
           className="rounded-2xl p-10 text-center flex flex-col items-center justify-center"
@@ -292,7 +298,7 @@ export function Dashboard() {
               <h3 className="text-sm font-semibold uppercase tracking-wider mb-3" style={{ color: 'var(--text-muted)' }}>
                 Weekly quota history
               </h3>
-              <WeeklyUsageChart data={quotaHistory.map(h => ({ timestamp: new Date(h.capturedAt * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), value: h.usedPercent }))} />
+              <WeeklyUsageChart data={quotaHistory.map(h => ({ timestamp: h.capturedAt * 1000, value: h.usedPercent }))} />
             </div>
           </div>
         );
@@ -303,16 +309,14 @@ export function Dashboard() {
             <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
               <Gauge size={20} style={{ color: 'var(--purple)' }} /> Monitored Rate Limits
             </h2>
-
-            <div className="grid grid-cols-1 gap-6">
-              {fiveHourWindow && <WeeklyLimitCard window={fiveHourWindow} />}
-              {weeklyWindow && <WeeklyLimitCard window={weeklyWindow} />}
-              {!fiveHourWindow && !weeklyWindow && (
-                <div className="rounded-2xl p-8 text-center" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-default)' }}>
-                  <span style={{ color: 'var(--text-muted)' }}>No rate limits currently active.</span>
-                </div>
-              )}
-            </div>
+            {(snapshot?.limits ?? []).map(bucket => (
+              <div key={bucket.limitId} className="space-y-3">
+                <h3 className="text-sm font-semibold" style={{ color: 'var(--text-secondary)' }}>{bucket.limitName ?? bucket.limitId}</h3>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">{bucket.windows.map(window => <WeeklyLimitCard key={window.source} window={window} />)}</div>
+              </div>
+            ))}
+            <LimitPeriodHistory />
+            <AccountUsageCoverage />
           </div>
         );
 
@@ -374,12 +378,9 @@ export function Dashboard() {
               <div className="rounded-2xl p-5" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-default)' }}>
                 <span className="text-xs font-medium block mb-1" style={{ color: 'var(--text-muted)' }}>Lifetime Total</span>
                 <span className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>
-                  {accountUsage?.summary?.lifetimeTokens
-                    ? formatNumber(accountUsage.summary.lifetimeTokens)
-                    : tokenTotals?.allTimeRecorded.totalTokens
-                      ? formatNumber(tokenTotals.allTimeRecorded.totalTokens)
-                      : '0'}
+                  {lifetime.value !== null ? formatNumber(lifetime.value) : '—'}
                 </span>
+                <p className="text-xs mt-2" style={{ color: 'var(--text-muted)' }}>{lifetime.usableReport ? 'Reported by Codex' : 'Local records · account total unavailable or incomplete'}</p>
               </div>
             </div>
           </div>
@@ -388,6 +389,7 @@ export function Dashboard() {
       case 'settings':
         return (
           <div className="space-y-6">
+            <PricingCatalogCard />
             <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
               <SettingsIcon size={20} style={{ color: 'var(--purple)' }} /> Application Settings
             </h2>
@@ -423,9 +425,9 @@ export function Dashboard() {
       case 'overview':
       default:
         return (
-          <div className="space-y-4">
+          <div className="overview-layout">
             {/* Both quota windows are primary information. */}
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <div className="quota-grid">
               <WeeklyLimitCard window={fiveHourWindow} compact />
               <WeeklyLimitCard window={weeklyWindow} compact />
             </div>
@@ -433,38 +435,34 @@ export function Dashboard() {
             <TokenUsageSummary accountUsage={accountUsage} tokenTotals={tokenTotals} currentChat={currentChat} />
 
             {/* Row: Chart + Metric cards */}
-            <div className="grid grid-cols-1 xl:grid-cols-5 gap-4">
-              <div className="xl:col-span-3">
+            <div className="overview-history">
+              <div>
                 <WeeklyUsageChart
                   data={quotaHistory.map(h => ({
-                    timestamp: new Date(h.capturedAt * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                    timestamp: h.capturedAt * 1000,
                     value: h.usedPercent,
                   }))}
                   onViewHistory={() => setActivePage('history')}
                 />
               </div>
-              <div className="xl:col-span-2">
+              <div>
                 <MetricCardGrid tokenTotals={tokenTotals} usageDeltas={usageDeltas} />
               </div>
             </div>
 
-            {/* Row: Recent Events + Limit Summary */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <RecentEventsCard events={recentEvents as any} />
-              <LimitSummaryCard
-                fiveHourWindow={fiveHourWindow}
-                weeklyWindow={weeklyWindow}
-              />
-            </div>
+            <RecentEventsCard events={recentEvents} />
           </div>
         );
     }
   };
 
   return (
-    <div className="p-6 space-y-4" style={{ animation: 'fade-in 300ms ease-out' }}>
+    <div className="dashboard-content space-y-4">
       <DashboardHeader />
-      {renderActiveView()}
+      {savedAccount && <p className="text-sm" style={{ color: 'var(--text-muted)' }}>
+        Showing saved usage for this account. Sign into it in Codex to update its quotas.
+      </p>}
+      <div key={accountKey}>{renderActiveView()}</div>
     </div>
   );
 }

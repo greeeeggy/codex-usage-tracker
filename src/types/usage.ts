@@ -8,6 +8,7 @@ export interface UsageWindow {
 }
 
 export interface UsageSnapshot {
+  accountKey: string | null;
   capturedAt: string;
   limitId: string | null;
   limitName: string | null;
@@ -15,6 +16,7 @@ export interface UsageSnapshot {
   rateLimitReachedType: string | null;
   credits: { balance: string; hasCredits: boolean; unlimited: boolean } | null;
   windows: UsageWindow[];
+  limits: { limitId: string; limitName: string | null; windows: UsageWindow[] }[];
   latestContextWindow: number | null;
   latestContextLoadPercent: number | null;
   latestLastRequestTokens: TokenBreakdown | null;
@@ -54,6 +56,7 @@ export interface TokenBreakdown {
 }
 
 export interface TokenTotals {
+  accountKey: string | null;
   currentSession: TokenBreakdown;
   fiveHourWindow: TokenBreakdown;
   weeklyWindow: TokenBreakdown;
@@ -76,8 +79,15 @@ export interface DailyUsageBucket {
 }
 
 export interface AccountUsage {
+  accountKey: string | null;
   summary: AccountUsageSummary | null;
   dailyUsageBuckets: DailyUsageBucket[] | null;
+  fetchedAt?: number | null;
+}
+
+export interface AccountDayPage {
+  days: { startDate: string; tokens: number; observedAt: number }[];
+  total: number;
 }
 
 export interface QuotaSampleRow {
@@ -122,6 +132,7 @@ export interface ChatRequestUsage {
 }
 
 export interface ChatSessionSummary {
+  accountKey: string;
   id: string;
   title: string;
   cwd: string | null;
@@ -163,4 +174,37 @@ export interface ChatTurnDetail {
 export interface ChatSessionDetail {
   summary: ChatSessionSummary;
   turns: ChatTurnDetail[];
+}
+
+export interface LimitPeriod {
+  id: number;
+  limitId: string;
+  limitName: string | null;
+  windowKind: string;
+  startedAt: number;
+  resetsAt: number;
+  firstObservedAt: number;
+  lastObservedAt: number;
+  usedPercent: number;
+  status: 'active' | 'completed';
+  tokens: TokenBreakdown;
+}
+
+export interface LimitHistoryPage { periods: LimitPeriod[]; total: number }
+
+export interface AccountProfile {
+  accountKey: string;
+  label: string;
+  email: string | null;
+  planType: string | null;
+  isLegacy: boolean;
+}
+export interface AccountContext { activeAccount: AccountProfile | null; accounts: AccountProfile[] }
+
+export interface PriceRates { input: number; cachedInput: number | null; cacheWrite: number | null; output: number }
+export interface PricingCatalog {
+  source: string;
+  fetchedAt: number | null;
+  models: Record<string, { standard: PriceRates; longContext: PriceRates | null; longContextThreshold: number | null }>;
+  lastError: string | null;
 }

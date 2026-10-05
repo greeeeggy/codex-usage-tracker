@@ -1,7 +1,10 @@
+mod accounts;
 mod codex_client;
 mod commands;
 mod db;
+mod limit_history;
 mod local_server;
+mod pricing;
 mod process_detector;
 mod session_history;
 mod session_log_watcher;
@@ -21,7 +24,15 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
-        .plugin(tauri_plugin_window_state::Builder::new().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                // Old saved states can enable a native caption over our custom title bar.
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        & !tauri_plugin_window_state::StateFlags::DECORATIONS,
+                )
+                .build(),
+        )
         .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {}))
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
@@ -43,48 +54,32 @@ pub fn run() {
 
             // Store the shared state for Tauri commands
             app.manage(shared_state.clone());
+            pricing::initialize(&db);
+            db.backfill_limit_periods().map_err(std::io::Error::other)?;
+            let pricing_db = db.clone();
+            let pricing_app = app_handle.clone();
+            rt.spawn(async move {
+                pricing::run(pricing_db, pricing_app).await;
+            });
             app.manage(db);
 
             // Create SSE broadcast channel for local server
             let (sse_tx, _) = tokio::sync::broadcast::channel::<String>(100);
             let sse_tx_clone = sse_tx.clone();
 
-            // Subscribe to usage-updated events to broadcast via SSE
-            let sse_tx_for_events = sse_tx.clone();
-            let state_for_sse = shared_state.clone();
-            let handle = rt.handle().clone();
-            app_handle.listen("usage-updated", move |_event| {
-                let state = state_for_sse.clone();
-                let tx = sse_tx_for_events.clone();
-                handle.spawn(async move {
-                    let s = state.read().await;
-                    if let Some(snapshot) = &s.snapshot {
-                        // Build the simplified JSON for SSE/API consumers
-                        let mut data = serde_json::Map::new();
-                        for window in &snapshot.windows {
-                            data.insert(
-                                window.name.clone(),
-                                serde_json::json!({
-                                    "remainingPercent": window.remaining_percent,
-                                    "usedPercent": window.used_percent,
-                                    "resetsAt": window.resets_at,
-                                    "durationMinutes": window.duration_minutes,
-                                }),
-                            );
-                        }
-                        data.insert(
-                            "planType".to_string(),
-                            serde_json::json!(snapshot.plan_type),
-                        );
-                        data.insert(
-                            "capturedAt".to_string(),
-                            serde_json::json!(snapshot.captured_at),
-                        );
-                        let json = serde_json::to_string(&data).unwrap_or_default();
-                        let _ = tx.send(json);
-                    }
+            for event_name in ["usage-updated", "accounts-updated"] {
+                let state_for_sse = shared_state.clone();
+                let tx_for_sse = sse_tx.clone();
+                let handle = rt.handle().clone();
+                app_handle.listen(event_name, move |_event| {
+                    let state = state_for_sse.clone();
+                    let tx = tx_for_sse.clone();
+                    handle.spawn(async move {
+                        let state = state.read().await;
+                        let _ = tx.send(local_server::usage_payload(&state).to_string());
+                    });
                 });
-            });
+            }
 
             // Build tray menu
             let show_dashboard =
@@ -192,6 +187,7 @@ pub fn run() {
 
             // Hide main window on startup (tray-only)
             if let Some(main_window) = app.get_webview_window("main") {
+                main_window.set_decorations(false)?;
                 let _ = main_window.hide();
 
                 // Intercept the close button — hide instead of exiting
@@ -208,6 +204,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::get_accounts,
             commands::get_usage,
             commands::get_account_usage,
             commands::get_token_totals,
@@ -221,6 +218,10 @@ pub fn run() {
             commands::get_chat_sessions,
             commands::get_chat_session_detail,
             commands::get_current_chat_summary,
+            commands::get_pricing,
+            commands::refresh_pricing,
+            commands::get_limit_history,
+            commands::get_account_usage_days,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

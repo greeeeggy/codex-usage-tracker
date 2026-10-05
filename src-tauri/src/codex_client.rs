@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -15,12 +17,15 @@ pub enum CodexEvent {
     TokenUsageUpdated(crate::db::TokenEvent),
     // Error(String),
     Disconnected,
+    AccountChanged,
 }
 
 /// Normalized usage snapshot
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageSnapshot {
+    #[serde(default)]
+    pub account_key: Option<String>,
     pub captured_at: String,
     pub limit_id: Option<String>,
     pub limit_name: Option<String>,
@@ -28,9 +33,19 @@ pub struct UsageSnapshot {
     pub rate_limit_reached_type: Option<String>,
     pub credits: Option<serde_json::Value>,
     pub windows: Vec<UsageWindow>,
+    #[serde(default)]
+    pub limits: Vec<LimitBucket>,
     pub latest_context_window: Option<i64>,
     pub latest_context_load_percent: Option<f64>,
     pub latest_last_request_tokens: Option<crate::db::TokenBreakdown>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitBucket {
+    pub limit_id: String,
+    pub limit_name: Option<String>,
+    pub windows: Vec<UsageWindow>,
 }
 
 /// A single rate-limit window (e.g., 5-hour or weekly)
@@ -49,8 +64,12 @@ pub struct UsageWindow {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountUsage {
+    #[serde(default)]
+    pub account_key: Option<String>,
     pub summary: Option<AccountUsageSummary>,
     pub daily_usage_buckets: Option<Vec<DailyUsageBucket>>,
+    #[serde(default)]
+    pub fetched_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -89,7 +108,11 @@ struct JsonRpcMessage {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawWindow {
-    #[serde(alias = "windowDurationMins", alias = "window_duration_mins")]
+    #[serde(
+        alias = "windowDurationMins",
+        alias = "window_duration_mins",
+        alias = "window_minutes"
+    )]
     window_duration_mins: Option<u64>,
     #[serde(alias = "usedPercent", alias = "used_percent")]
     used_percent: Option<f64>,
@@ -103,9 +126,13 @@ struct RawWindow {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawSnapshot {
+    #[serde(alias = "limit_id")]
     limit_id: Option<String>,
+    #[serde(alias = "limit_name")]
     limit_name: Option<String>,
+    #[serde(alias = "plan_type")]
     plan_type: Option<String>,
+    #[serde(alias = "rate_limit_reached_type")]
     rate_limit_reached_type: Option<String>,
     credits: Option<serde_json::Value>,
     primary: Option<RawWindow>,
@@ -122,6 +149,7 @@ type PendingMap = Arc<Mutex<HashMap<u64, PendingRequest>>>;
 pub struct CodexClient {
     event_tx: mpsc::UnboundedSender<CodexEvent>,
     command_tx: Option<mpsc::UnboundedSender<ClientCommand>>,
+    account: Arc<Mutex<Option<crate::accounts::AccountProfile>>>,
 }
 
 enum ClientCommand {
@@ -143,22 +171,30 @@ impl CodexClient {
         Self {
             event_tx,
             command_tx: None,
+            account: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Start the Codex app-server process and begin communication
     pub async fn start(&mut self) -> Result<(), String> {
+        let starting_identity = crate::accounts::local_account()?.map(|a| a.account_key);
         let codex_path = find_codex_executable()?;
-        log::info!("[CODEX] Found executable: {}", codex_path);
+        log::info!("[CODEX] Found executable: {}", codex_path.display());
 
         let mut child = Command::new(&codex_path)
-            .args(["app-server", "--stdio"])
+            .args(["app-server", "--listen", "stdio://"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .creation_flags(0x08000000) // CREATE_NO_WINDOW on Windows
             .spawn()
-            .map_err(|e| format!("Failed to start codex app-server: {}", e))?;
+            .map_err(|e| {
+                format!(
+                    "Failed to start codex app-server at {}: {}",
+                    codex_path.display(),
+                    e
+                )
+            })?;
 
         log::info!("[CODEX] Spawned codex app-server (PID: {})", child.id());
 
@@ -192,6 +228,7 @@ impl CodexClient {
         // Stdout reader thread - reads JSON lines and dispatches
         let pending_reader = pending.clone();
         let event_tx_reader = self.event_tx.clone();
+        let account_reader = self.account.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
@@ -226,13 +263,25 @@ impl CodexClient {
 
                             // Push notification
                             if let Some(method) = &msg.method {
+                                if method == "account/updated" {
+                                    if account_reader.lock().unwrap().take().is_some() {
+                                        let _ = event_tx_reader.send(CodexEvent::AccountChanged);
+                                    }
+                                }
                                 if method == "account/rateLimits/updated" {
                                     if let Some(params) = msg.params {
                                         if let Some(snapshot) = params.get("rateLimits") {
-                                            if let Ok(raw) = serde_json::from_value::<RawSnapshot>(
-                                                snapshot.clone(),
+                                            if let Ok(mut normalized) = parse_rate_limits(
+                                                &serde_json::json!({
+                                                    "rateLimits": snapshot,
+                                                    "rateLimitsByLimitId": params.get("rateLimitsByLimitId")
+                                                }),
                                             ) {
-                                                let normalized = normalize_snapshot(&raw);
+                                                normalized.account_key = account_reader
+                                                    .lock()
+                                                    .unwrap()
+                                                    .as_ref()
+                                                    .map(|a| a.account_key.clone());
                                                 let _ = event_tx_reader
                                                     .send(CodexEvent::UsageUpdated(normalized));
                                             }
@@ -270,7 +319,14 @@ impl CodexClient {
 
                                         let event = crate::db::TokenEvent {
                                             id: uuid::Uuid::new_v4().to_string(),
-                                            account_key: "default".to_string(),
+                                            account_key: account_reader
+                                                .lock()
+                                                .unwrap()
+                                                .as_ref()
+                                                .map(|a| a.account_key.clone())
+                                                .unwrap_or_else(|| {
+                                                    crate::accounts::LEGACY_ACCOUNT.into()
+                                                }),
                                             captured_at: chrono::Utc::now().timestamp(),
                                             client_type: "unknown".to_string(),
                                             thread_id: params
@@ -370,7 +426,7 @@ impl CodexClient {
                     "clientInfo": {
                         "name": "codex_meter",
                         "title": "Codex Meter",
-                        "version": "0.1.0"
+                        "version": env!("CARGO_PKG_VERSION")
                     }
                 })),
             )
@@ -380,6 +436,10 @@ impl CodexClient {
 
         // Send initialized notification
         self.notify("initialized", None);
+        self.read_account().await?;
+        if starting_identity != crate::accounts::local_account()?.map(|a| a.account_key) {
+            return Err("Codex account changed while connecting; reconnecting".into());
+        }
 
         Ok(())
     }
@@ -422,42 +482,65 @@ impl CodexClient {
 
     /// Fetch current rate limits
     pub async fn read_rate_limits(&self) -> Result<UsageSnapshot, String> {
+        let account = self
+            .account()
+            .ok_or("Please sign in to Codex to read account usage")?;
+        self.check_identity(&account)?;
         let result = self.request("account/rateLimits/read", None).await?;
-        log::info!(
-            "[CODEX] Raw rate limits response: {}",
-            serde_json::to_string_pretty(&result).unwrap_or_default()
-        );
+        self.check_identity(&account)?;
+        let mut snapshot = parse_rate_limits(&result)?;
+        snapshot.account_key = Some(account.account_key);
+        Ok(snapshot)
+    }
 
-        // Try to extract rate limits from the response
-        let snapshot_value = result
-            .get("rateLimitsByLimitId")
-            .and_then(|v| v.get("codex"))
-            .or_else(|| result.get("rateLimits"))
-            .ok_or("Codex returned no rate-limit snapshot")?;
+    pub fn account(&self) -> Option<crate::accounts::AccountProfile> {
+        self.account.lock().unwrap().clone()
+    }
 
-        log::info!(
-            "[CODEX] Extracted snapshot value: {}",
-            serde_json::to_string_pretty(&snapshot_value).unwrap_or_default()
-        );
+    pub(crate) fn has_current_identity(&self) -> bool {
+        self.account()
+            .is_some_and(|a| self.check_identity(&a).is_ok())
+    }
 
-        let raw: RawSnapshot = serde_json::from_value(snapshot_value.clone())
-            .map_err(|e| format!("Failed to parse rate limits: {}", e))?;
+    fn check_identity(&self, account: &crate::accounts::AccountProfile) -> Result<(), String> {
+        if self.account().as_ref().map(|a| &a.account_key) != Some(&account.account_key) {
+            return Err("Codex account changed; reconnecting".into());
+        }
+        if !account.account_key.starts_with("chatgpt-email:")
+            && crate::accounts::local_account()?
+                .as_ref()
+                .map(|a| &a.account_key)
+                != Some(&account.account_key)
+        {
+            return Err("Codex account changed; reconnecting".into());
+        }
+        Ok(())
+    }
 
-        log::info!(
-            "[CODEX] Parsed raw snapshot: planType={:?}, primary={:?}, secondary={:?}",
-            raw.plan_type,
-            raw.primary.is_some(),
-            raw.secondary.is_some()
-        );
-
-        Ok(normalize_snapshot(&raw))
+    pub async fn read_account(&self) -> Result<Option<crate::accounts::AccountProfile>, String> {
+        let result = self
+            .request(
+                "account/read",
+                Some(serde_json::json!({"refreshToken":false})),
+            )
+            .await?;
+        let profile = crate::accounts::from_response(&result, crate::accounts::local_account()?)?;
+        *self.account.lock().unwrap() = profile.clone();
+        Ok(profile)
     }
 
     /// Fetch authoritative account-level token activity from Codex.
     pub async fn read_account_usage(&self) -> Result<AccountUsage, String> {
+        let account = self
+            .account()
+            .ok_or("Please sign in to Codex to read account usage")?;
+        self.check_identity(&account)?;
         let result = self.request("account/usage/read", None).await?;
-        serde_json::from_value(result)
-            .map_err(|e| format!("Failed to parse account token usage: {}", e))
+        self.check_identity(&account)?;
+        let mut usage: AccountUsage = serde_json::from_value(result)
+            .map_err(|e| format!("Failed to parse account token usage: {}", e))?;
+        usage.account_key = Some(account.account_key);
+        Ok(usage)
     }
 
     /// Stop the client
@@ -468,29 +551,98 @@ impl CodexClient {
     }
 }
 
-/// Find the codex executable on the system
-fn find_codex_executable() -> Result<String, String> {
-    // Try "codex" directly (should be on PATH if installed globally)
-    if Command::new("codex")
-        .arg("--version")
-        .creation_flags(0x08000000)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok()
-    {
-        return Ok("codex".to_string());
+/// Resolve native binaries rather than npm's .cmd shim, which requires cmd.exe
+/// and fails with error 740 when that shell is configured to run as administrator.
+fn codex_executable_candidates(appdata: Option<&OsStr>, path: Option<&OsStr>) -> Vec<PathBuf> {
+    let mut prefixes = Vec::new();
+    if let Some(appdata) = appdata {
+        prefixes.push(Path::new(appdata).join("npm"));
+    }
+    if let Some(path) = path {
+        prefixes.extend(std::env::split_paths(path));
     }
 
-    // Try common npm global paths on Windows
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        let npm_path = format!("{}\\npm\\codex.cmd", appdata);
-        if std::path::Path::new(&npm_path).exists() {
-            return Ok(npm_path);
+    let (platform_package, target) = if cfg!(target_arch = "aarch64") {
+        ("codex-win32-arm64", "aarch64-pc-windows-msvc")
+    } else {
+        ("codex-win32-x64", "x86_64-pc-windows-msvc")
+    };
+    let mut candidates = Vec::new();
+    for prefix in &prefixes {
+        let scope = prefix.join("node_modules").join("@openai");
+        let package = scope.join("codex");
+        // Current npm installs nest the platform package under @openai/codex.
+        // Hoisted dependencies and older bundled-vendor releases also work.
+        for vendor in [
+            package
+                .join("node_modules")
+                .join("@openai")
+                .join(platform_package)
+                .join("vendor"),
+            scope.join(platform_package).join("vendor"),
+            package.join("vendor"),
+        ] {
+            for binary_dir in ["bin", "codex"] {
+                let candidate = vendor.join(target).join(binary_dir).join("codex.exe");
+                if !candidates.contains(&candidate) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+    }
+    // Standalone CLI installations remain supported, using an absolute path.
+    for prefix in prefixes {
+        let candidate = prefix.join("codex.exe");
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+fn find_codex_executable() -> Result<PathBuf, String> {
+    let appdata = std::env::var_os("APPDATA");
+    let path = std::env::var_os("PATH");
+    let mut failures = Vec::new();
+    for candidate in codex_executable_candidates(appdata.as_deref(), path.as_deref()) {
+        if !candidate.is_file() {
+            continue;
+        }
+        let candidate = match candidate.canonicalize() {
+            Ok(path) => path,
+            Err(error) => {
+                failures.push(format!("{}: {}", candidate.display(), error));
+                continue;
+            }
+        };
+        match Command::new(&candidate)
+            .arg("--version")
+            .creation_flags(0x08000000)
+            .stdin(Stdio::null())
+            .output()
+        {
+            Ok(output)
+                if output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .trim()
+                        .starts_with("codex-cli ") =>
+            {
+                return Ok(candidate);
+            }
+            Ok(output) => failures.push(format!(
+                "{} did not report a Codex CLI version (exit {})",
+                candidate.display(),
+                output.status
+            )),
+            Err(error) => failures.push(format!("{}: {}", candidate.display(), error)),
         }
     }
 
-    Err("Codex CLI not found. Please install it with: npm install -g @openai/codex".to_string())
+    let mut message = "No usable Codex CLI executable found. Install or repair it with: npm install -g @openai/codex".to_string();
+    if !failures.is_empty() {
+        message.push_str(&format!(". {}", failures.join("; ")));
+    }
+    Err(message)
 }
 
 /// Generate a simple incrementing ID
@@ -512,17 +664,65 @@ fn normalize_snapshot(raw: &RawSnapshot) -> UsageSnapshot {
     }
 
     UsageSnapshot {
+        account_key: None,
         captured_at: chrono::Utc::now().to_rfc3339(),
         limit_id: raw.limit_id.clone(),
         limit_name: raw.limit_name.clone(),
         plan_type: raw.plan_type.clone(),
         rate_limit_reached_type: raw.rate_limit_reached_type.clone(),
         credits: raw.credits.clone(),
+        limits: vec![LimitBucket {
+            limit_id: raw.limit_id.clone().unwrap_or_else(|| "codex".into()),
+            limit_name: raw.limit_name.clone(),
+            windows: windows.clone(),
+        }],
         windows,
         latest_context_window: None,
         latest_context_load_percent: None,
         latest_last_request_tokens: None,
     }
+}
+
+pub(crate) fn parse_rate_limits(value: &serde_json::Value) -> Result<UsageSnapshot, String> {
+    let mut buckets = Vec::new();
+    if let Some(map) = value.get("rateLimitsByLimitId").and_then(|v| v.as_object()) {
+        for (id, bucket) in map {
+            if bucket.is_null() {
+                continue;
+            }
+            let mut raw: RawSnapshot =
+                serde_json::from_value(bucket.clone()).map_err(|e| e.to_string())?;
+            raw.limit_id = Some(id.clone());
+            buckets.push(normalize_snapshot(&raw));
+        }
+    }
+    if let Some(legacy) = value.get("rateLimits").filter(|v| !v.is_null()) {
+        let raw: RawSnapshot = serde_json::from_value(legacy.clone()).map_err(|e| e.to_string())?;
+        let id = raw.limit_id.as_deref().unwrap_or("codex");
+        if !buckets
+            .iter()
+            .any(|b| b.limit_id.as_deref().unwrap_or("codex") == id)
+        {
+            buckets.push(normalize_snapshot(&raw));
+        }
+    }
+    let selected = buckets
+        .iter()
+        .find(|b| b.limit_id.as_deref() == Some("codex"))
+        .or_else(|| buckets.first())
+        .ok_or("Codex returned no rate-limit snapshot")?;
+    let mut snapshot = selected.clone();
+    snapshot.limits = buckets.into_iter().flat_map(|b| b.limits).collect();
+    Ok(snapshot)
+}
+
+pub(crate) fn snapshot_from_rollout(
+    value: &serde_json::Value,
+    timestamp: &str,
+) -> Option<UsageSnapshot> {
+    let mut snapshot = parse_rate_limits(&serde_json::json!({ "rateLimits": value })).ok()?;
+    snapshot.captured_at = timestamp.to_string();
+    Some(snapshot)
 }
 
 /// Normalize a single window
@@ -564,6 +764,79 @@ fn normalize_window(source: &str, raw: &RawWindow) -> UsageWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovers_native_npm_binaries_with_spaces_and_ignores_cmd_shims() {
+        let root = std::env::temp_dir().join(format!("codex meter {}", uuid::Uuid::new_v4()));
+        let appdata = root.join("AppData").join("Roaming");
+        let prefix = appdata.join("npm");
+        let scope = prefix.join("node_modules").join("@openai");
+        let (platform, target) = if cfg!(target_arch = "aarch64") {
+            ("codex-win32-arm64", "aarch64-pc-windows-msvc")
+        } else {
+            ("codex-win32-x64", "x86_64-pc-windows-msvc")
+        };
+        let paths = [
+            scope
+                .join("codex")
+                .join("node_modules")
+                .join("@openai")
+                .join(platform)
+                .join("vendor")
+                .join(target)
+                .join("bin")
+                .join("codex.exe"),
+            scope
+                .join(platform)
+                .join("vendor")
+                .join(target)
+                .join("bin")
+                .join("codex.exe"),
+            scope
+                .join("codex")
+                .join("vendor")
+                .join(target)
+                .join("codex")
+                .join("codex.exe"),
+        ];
+        std::fs::create_dir_all(&prefix).unwrap();
+        std::fs::write(prefix.join("codex.cmd"), "@echo this shim must not run").unwrap();
+        for native in &paths {
+            std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+            std::fs::write(native, []).unwrap();
+            let candidates = codex_executable_candidates(Some(appdata.as_os_str()), None);
+            assert_eq!(candidates.iter().find(|path| path.is_file()), Some(native));
+            assert!(candidates
+                .iter()
+                .all(|path| path.extension() == Some(OsStr::new("exe"))));
+            std::fs::remove_file(native).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "Requires the official Codex CLI; exercised by the Windows build workflow"]
+    async fn initializes_native_app_server_without_command_prompt() {
+        let executable = find_codex_executable().expect("native Codex CLI should be installed");
+        assert_eq!(executable.extension(), Some(OsStr::new("exe")));
+        assert!(executable.is_absolute());
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let mut client = CodexClient::new(event_tx);
+        client
+            .start()
+            .await
+            .expect("native app-server should initialize");
+        client.stop();
+        timeout(Duration::from_secs(15), async {
+            while let Some(event) = event_rx.recv().await {
+                if matches!(event, CodexEvent::Disconnected) {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("app-server should exit after stdin closes");
+    }
 
     #[test]
     fn normalizes_five_hour_and_weekly_windows() {
@@ -622,5 +895,41 @@ mod tests {
                 .and_then(|buckets| buckets.first().map(|bucket| bucket.tokens)),
             Some(12_345)
         );
+    }
+}
+
+#[cfg(test)]
+mod bucket_tests {
+    use super::*;
+    #[test]
+    fn map_reads_every_bucket_and_deduplicates_legacy() {
+        let result = serde_json::json!({"rateLimitsByLimitId": {
+            "codex": {"primary": {"windowDurationMins": 300, "usedPercent": 10, "resetsAt": 1800000000}},
+            "new-model": {"limitName": "New model", "secondary": {"windowDurationMins": 10080, "usedPercent": 30, "resetsAt": 1800000000}}
+        }, "rateLimits": {"limitId": "codex", "primary": {"windowDurationMins": 300, "usedPercent": 10, "resetsAt": 1800000000}}});
+        let snapshot = parse_rate_limits(&result).unwrap();
+        assert_eq!(snapshot.limit_id.as_deref(), Some("codex"));
+        assert_eq!(snapshot.limits.len(), 2);
+        assert_eq!(
+            snapshot
+                .limits
+                .iter()
+                .find(|b| b.limit_id == "new-model")
+                .unwrap()
+                .windows[0]
+                .name,
+            "weekly"
+        );
+    }
+    #[test]
+    fn accepts_rollout_snake_case_schema() {
+        let snapshot = snapshot_from_rollout(
+            &serde_json::json!({"limit_id": "new-coder", "limit_name": "New coder",
+            "primary": {"window_minutes": 300, "used_percent": 15, "resets_at": 1800000000}}),
+            "2026-10-02T12:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(snapshot.limits[0].limit_id, "new-coder");
+        assert_eq!(snapshot.windows[0].name, "fiveHour");
     }
 }

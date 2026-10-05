@@ -33,7 +33,7 @@ pub struct DetailedTokenUsage {
 }
 
 impl DetailedTokenUsage {
-    fn from_value(value: &Value) -> Self {
+    pub(crate) fn from_value(value: &Value) -> Self {
         let input_tokens = value
             .get("input_tokens")
             .and_then(Value::as_i64)
@@ -44,6 +44,7 @@ impl DetailedTokenUsage {
             .unwrap_or(0);
         let cache_write_input_tokens = value
             .get("cache_write_input_tokens")
+            .or_else(|| value.get("cache_write_tokens"))
             .and_then(Value::as_i64)
             .unwrap_or(0);
         let output_tokens = value
@@ -97,6 +98,7 @@ pub struct ChatRequestUsage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatSessionSummary {
+    pub account_key: String,
     pub id: String,
     pub title: String,
     pub cwd: Option<String>,
@@ -146,83 +148,21 @@ pub struct ChatSessionDetail {
     pub turns: Vec<ChatTurnDetail>,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ModelPricing {
-    input_per_million: f64,
-    cached_input_per_million: f64,
-    output_per_million: f64,
-    cache_write_multiplier: f64,
-    long_context_multiplier: bool,
-}
-
-fn pricing_for_model(model: &str) -> Option<ModelPricing> {
-    let normalized = model.to_ascii_lowercase();
-    let pricing = if normalized.contains("gpt-5.6-sol") {
-        ModelPricing {
-            input_per_million: 4.0,
-            cached_input_per_million: 0.40,
-            output_per_million: 20.0,
-            cache_write_multiplier: 1.25,
-            long_context_multiplier: true,
+pub(crate) fn invalidate_price_cache() {
+    if let Some(cache) = SUMMARY_CACHE.get() {
+        if let Ok(mut entries) = cache.lock() {
+            entries.clear();
         }
-    } else if normalized.contains("gpt-5.6-terra") {
-        ModelPricing {
-            input_per_million: 2.0,
-            cached_input_per_million: 0.20,
-            output_per_million: 12.0,
-            cache_write_multiplier: 1.25,
-            long_context_multiplier: true,
-        }
-    } else if normalized.contains("gpt-5.6-luna") {
-        ModelPricing {
-            input_per_million: 0.20,
-            cached_input_per_million: 0.02,
-            output_per_million: 1.20,
-            cache_write_multiplier: 1.25,
-            long_context_multiplier: true,
-        }
-    } else if normalized.contains("gpt-5.5") {
-        ModelPricing {
-            input_per_million: 5.0,
-            cached_input_per_million: 0.50,
-            output_per_million: 30.0,
-            cache_write_multiplier: 1.25,
-            long_context_multiplier: true,
-        }
-    } else {
-        return None;
-    };
-
-    Some(pricing)
+    }
 }
 
 fn estimate_cost(
     usage: &DetailedTokenUsage,
     model: Option<&str>,
-    apply_per_request_threshold: bool,
+    per_request: bool,
 ) -> Option<f64> {
-    let pricing = pricing_for_model(model?)?;
-    let long_context = apply_per_request_threshold
-        && pricing.long_context_multiplier
-        && usage.input_tokens > 272_000;
-    let input_multiplier = if long_context { 2.0 } else { 1.0 };
-    let output_multiplier = if long_context { 1.5 } else { 1.0 };
-    let million = 1_000_000.0;
-
-    let uncached_cost =
-        usage.uncached_input_tokens as f64 * pricing.input_per_million * input_multiplier / million;
-    let cached_cost =
-        usage.cached_input_tokens as f64 * pricing.cached_input_per_million * input_multiplier
-            / million;
-    let cache_write_cost = usage.cache_write_input_tokens as f64
-        * pricing.input_per_million
-        * pricing.cache_write_multiplier
-        * input_multiplier
-        / million;
-    let output_cost =
-        usage.output_tokens as f64 * pricing.output_per_million * output_multiplier / million;
-
-    Some(uncached_cost + cached_cost + cache_write_cost + output_cost)
+    let prices = crate::pricing::catalog();
+    crate::pricing::estimate(usage, crate::pricing::lookup(&prices, model?)?, per_request)
 }
 
 fn cache_rate(usage: &DetailedTokenUsage) -> f64 {
@@ -234,6 +174,9 @@ fn cache_rate(usage: &DetailedTokenUsage) -> f64 {
 }
 
 pub(crate) fn sessions_dir() -> Option<PathBuf> {
+    if let Some(codex_dir) = std::env::var_os("CODEX_HOME").filter(|p| !p.is_empty()) {
+        return Some(PathBuf::from(codex_dir).join("sessions"));
+    }
     if let Ok(user_profile) = std::env::var("USERPROFILE") {
         Some(PathBuf::from(user_profile).join(".codex").join("sessions"))
     } else if let Ok(home) = std::env::var("HOME") {
@@ -340,6 +283,7 @@ fn parse_usage_info(payload: &Value) -> Option<(DetailedTokenUsage, DetailedToke
 
 #[derive(Default)]
 struct SummaryHead {
+    account_key: Option<String>,
     id: Option<String>,
     title: Option<String>,
     cwd: Option<String>,
@@ -371,6 +315,8 @@ fn read_summary_head(path: &Path) -> Result<SummaryHead, String> {
         if line_prefix.contains("\"type\":\"session_meta\"") {
             if let Ok(row) = serde_json::from_str::<Value>(&line) {
                 let payload = &row["payload"];
+                result.account_key =
+                    crate::accounts::from_session_metadata(payload).map(|a| a.account_key);
                 result.id = payload
                     .get("session_id")
                     .or_else(|| payload.get("id"))
@@ -436,30 +382,59 @@ fn read_summary_head(path: &Path) -> Result<SummaryHead, String> {
     Ok(result)
 }
 
-fn token_count_from_slice(slice: &str) -> Option<(DetailedTokenUsage, DetailedTokenUsage, String)> {
+struct LatestUsage {
+    total: DetailedTokenUsage,
+    last: DetailedTokenUsage,
+    timestamp: String,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+}
+
+fn token_count_from_slice(slice: &str) -> Option<LatestUsage> {
+    let mut latest = None;
     for line in slice.lines().rev() {
         let line_prefix = prefix(line);
-        if !line_prefix.contains("\"type\":\"event_msg\"")
+        if latest.is_some() && line_prefix.contains("\"type\":\"turn_context\"") {
+            let Ok(row) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let payload = &row["payload"];
+            let request: &mut LatestUsage = latest.as_mut().unwrap();
+            request.model = payload
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            request.reasoning_effort = payload
+                .pointer("/collaboration_mode/settings/reasoning_effort")
+                .or_else(|| payload.get("effort"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            return latest.take();
+        }
+        if latest.is_some()
+            || !line_prefix.contains("\"type\":\"event_msg\"")
             || !line_prefix.contains("\"type\":\"token_count\"")
         {
             continue;
         }
-        let row = serde_json::from_str::<Value>(line).ok()?;
-        let payload = row.get("payload")?;
-        let (total, last) = parse_usage_info(payload)?;
-        let timestamp = row
-            .get("timestamp")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        return Some((total, last, timestamp));
+        let Ok(row) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some((total, last)) = parse_usage_info(&row["payload"]) else {
+            continue;
+        };
+        latest = Some(LatestUsage {
+            total,
+            last,
+            timestamp: row["timestamp"].as_str().unwrap_or_default().into(),
+            model: None,
+            reasoning_effort: None,
+        });
     }
-    None
+    latest
 }
 
-fn read_latest_token_count(
-    path: &Path,
-) -> Result<Option<(DetailedTokenUsage, DetailedTokenUsage, String)>, String> {
+fn read_latest_token_count(path: &Path) -> Result<Option<LatestUsage>, String> {
     let mut file = File::open(path).map_err(|error| format!("Open session failed: {error}"))?;
     let len = file
         .metadata()
@@ -468,7 +443,6 @@ fn read_latest_token_count(
     if len == 0 {
         return Ok(None);
     }
-
     let mut span = SUMMARY_TAIL_INITIAL_BYTES.min(len);
     loop {
         file.seek(SeekFrom::Start(len - span))
@@ -482,11 +456,36 @@ fn read_latest_token_count(
         } else {
             text.as_ref()
         };
-        if let Some(result) = token_count_from_slice(complete_text) {
-            return Ok(Some(result));
+        let result = token_count_from_slice(complete_text);
+        if result.as_ref().is_some_and(|r| r.model.is_some()) || span == len {
+            return Ok(result);
         }
-        if span == len || span >= SUMMARY_TAIL_MAX_BYTES {
-            return Ok(None);
+        if span >= SUMMARY_TAIL_MAX_BYTES {
+            // Large tool output may push the latest turn context outside the
+            // tail. Stream the file instead of reusing its first model.
+            file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+            let mut model = None;
+            let mut effort = None;
+            let mut found = None;
+            for line in BufReader::new(file).lines() {
+                let line = line.map_err(|e| e.to_string())?;
+                let p = prefix(&line);
+                if p.contains("\"type\":\"turn_context\"") {
+                    if let Ok(row) = serde_json::from_str::<Value>(&line) {
+                        model = row["payload"]["model"].as_str().map(str::to_owned);
+                        effort = row["payload"]
+                            .pointer("/collaboration_mode/settings/reasoning_effort")
+                            .or_else(|| row["payload"].get("effort"))
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                    }
+                } else if let Some(mut usage) = token_count_from_slice(&line) {
+                    usage.model = model.clone();
+                    usage.reasoning_effort = effort.clone();
+                    found = Some(usage);
+                }
+            }
+            return Ok(found);
         }
         span = (span * 2).min(len).min(SUMMARY_TAIL_MAX_BYTES);
     }
@@ -525,14 +524,26 @@ fn fallback_title(head: &SummaryHead, id: &str) -> String {
 }
 
 fn summarize_file(path: &Path) -> Result<ChatSessionSummary, String> {
-    let head = read_summary_head(path)?;
+    let mut head = read_summary_head(path)?;
     let id = head.id.clone().unwrap_or_else(|| fallback_id(path));
     let title = head
         .title
         .clone()
         .unwrap_or_else(|| fallback_title(&head, &id));
     let latest = read_latest_token_count(path)?;
-    let (usage, latest_request) = if let Some((total, last, timestamp)) = latest {
+    let (usage, latest_request) = if let Some(latest) = latest {
+        if latest.model.is_some() {
+            head.model = latest.model;
+        }
+        if latest.reasoning_effort.is_some() {
+            head.reasoning_effort = latest.reasoning_effort;
+        }
+        let LatestUsage {
+            total,
+            last,
+            timestamp,
+            ..
+        } = latest;
         let latest_request = ChatRequestUsage {
             timestamp: (!timestamp.is_empty()).then_some(timestamp),
             model: head.model.clone(),
@@ -547,6 +558,9 @@ fn summarize_file(path: &Path) -> Result<ChatSessionSummary, String> {
     };
 
     Ok(ChatSessionSummary {
+        account_key: head
+            .account_key
+            .unwrap_or_else(|| crate::accounts::LEGACY_ACCOUNT.into()),
         id,
         title,
         cwd: head.cwd,
@@ -674,6 +688,15 @@ pub fn current_chat_summary() -> Result<Option<ChatSessionSummary>, String> {
     let mut summary = summarize_file_cached(&path)?;
     summary.is_current = true;
     Ok(Some(summary))
+}
+
+pub fn list_chat_sessions_for(account_key: &str) -> Result<Vec<ChatSessionSummary>, String> {
+    let mut rows = list_chat_sessions()?;
+    rows.retain(|row| row.account_key == account_key);
+    for (index, row) in rows.iter_mut().enumerate() {
+        row.is_current = index == 0;
+    }
+    Ok(rows)
 }
 
 fn valid_session_id(id: &str) -> bool {
@@ -908,8 +931,10 @@ pub fn read_chat_session(id: &str) -> Result<ChatSessionDetail, String> {
     summary.cache_rate = cache_rate(&summary.usage);
     summary.estimated_cost_usd = if request_count > 0 && all_requests_priced {
         Some(exact_cost)
-    } else {
+    } else if request_count == 0 {
         aggregate_cost_estimate
+    } else {
+        None
     };
     summary.latest_request = turns
         .iter()
@@ -939,9 +964,6 @@ mod tests {
         };
 
         assert!((cache_rate(&usage) - 98.046875).abs() < 0.0001);
-        let cost = estimate_cost(&usage, Some("gpt-5.6-sol"), true).unwrap();
-        let expected = (5.0 * 4.0 + 251.0 * 0.4 + 100.0 * 20.0) / 1_000_000.0;
-        assert!((cost - expected).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -974,5 +996,24 @@ mod tests {
         });
         assert!(!is_real_user_message(&instructions, "hidden context"));
         assert!(is_real_user_message(&user, "show my usage"));
+    }
+}
+
+#[cfg(test)]
+mod current_model_tests {
+    use super::*;
+    #[test]
+    fn latest_request_uses_its_model_after_a_model_switch() {
+        let text = concat!(
+            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"old-model\"}}\n",
+            "{\"timestamp\":\"2026-10-02T12:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"total_tokens\":100},\"last_token_usage\":{\"total_tokens\":100}}}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"brand-new-model\",\"effort\":\"high\"}}\n",
+            "{\"timestamp\":\"2026-10-02T13:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"total_tokens\":200},\"last_token_usage\":{\"total_tokens\":100}}}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\","
+        );
+        let latest = token_count_from_slice(text).unwrap();
+        assert_eq!(latest.model.as_deref(), Some("brand-new-model"));
+        assert_eq!(latest.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(latest.total.total_tokens, 200);
     }
 }

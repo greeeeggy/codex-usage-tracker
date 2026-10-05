@@ -1,0 +1,87 @@
+name: Test and build Windows executable
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master, 'codex/**']
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          cache-on-failure: true
+      - run: npm ci
+      - name: Build frontend and check types
+        run: npm run build
+      - name: Test pricing, log replay, and persisted limit windows
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Install official CLI for native-launch regression check
+        run: npm install --global @openai/codex@0.151.0
+      - name: Initialize app-server without Command Prompt
+        shell: pwsh
+        run: |
+          $env:ComSpec = Join-Path $env:RUNNER_TEMP 'unavailable-command-prompt.exe'
+          $env:CODEX_HOME = Join-Path $env:RUNNER_TEMP 'codex-meter-cli-check'
+          New-Item -ItemType Directory -Path $env:CODEX_HOME -Force | Out-Null
+          cargo test --locked --manifest-path src-tauri/Cargo.toml initializes_native_app_server_without_command_prompt -- --ignored
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install test browser
+        run: npx playwright install chromium
+      - name: Check dashboard layout, window controls, and account screens
+        run: npx playwright test
+      - name: Build Windows executable and installer
+        run: npm run tauri build -- --bundles nsis -- --locked
+      - name: Prepare verified downloads
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path release-download | Out-Null
+          Copy-Item -LiteralPath src-tauri/target/release/codex-meter.exe -Destination release-download/Codex-Meter.exe
+          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          Copy-Item -LiteralPath $installer.FullName -Destination release-download/Codex-Meter-setup.exe
+          $metadata = [ordered]@{ commit = '${{ github.sha }}'; run = '${{ github.run_id }}'; builtOn = 'GitHub Actions windows-latest'; files = @() }
+          foreach ($file in Get-ChildItem release-download/*.exe) {
+            $metadata.files += @{ name = $file.Name; bytes = $file.Length; sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash }
+          }
+          $metadata | ConvertTo-Json -Depth 5 | Set-Content release-download/build-info.json
+      - name: Check startup and title bar with an old decorated window state
+        shell: pwsh
+        run: |
+          $stateDirectory = Join-Path $env:APPDATA 'com.codexmeter.app'
+          New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null
+          @{ main = @{ width = 1200; height = 820; x = 50; y = 50; prev_x = 50; prev_y = 50; maximized = $false; visible = $true; decorated = $true; fullscreen = $false } } | ConvertTo-Json -Depth 3 | Set-Content (Join-Path $stateDirectory '.window-state.json')
+          $process = Start-Process -FilePath (Resolve-Path release-download/Codex-Meter.exe) -WindowStyle Hidden -PassThru
+          try {
+            Start-Sleep -Seconds 10
+            $process.Refresh()
+            if ($process.HasExited) { throw "Executable exited unexpectedly: $($process.ExitCode)" }
+            python tests/windows/check_window_frame.py --pid $process.Id
+            if ($LASTEXITCODE -ne 0) { throw 'The old window state restored a native title bar' }
+          } finally {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Codex-Meter-Windows
+          path: release-download/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verification
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
