@@ -295,7 +295,8 @@ impl Db {
             let names = stmt
                 .query_map([], |r| r.get::<_, String>(1))
                 .map_err(|e| e.to_string())?;
-            Ok(names.filter_map(Result::ok).any(|name| name == column))
+            let found = names.filter_map(Result::ok).any(|name| name == column);
+            Ok(found)
         };
         let migrate_days = !has_column("account_usage_days", "account_key")?;
         let migrate_events = !has_column("app_events", "account_key")?;
@@ -605,21 +606,37 @@ impl Db {
         }
         // Existing quota observations preserve known reset boundaries. Never
         // manufacture periods in unobserved gaps.
-        let samples: Vec<(i64, String, i64, i64, f64)> = {
+        let samples: Vec<(String, i64, String, i64, i64, f64)> = {
             let conn = self.conn.lock().unwrap();
-            let mut stmt = conn.prepare("SELECT captured_at, window_kind, duration_minutes, resets_at, used_percent
+            let mut stmt = conn.prepare("SELECT account_key, captured_at, window_kind, duration_minutes, resets_at, used_percent
                 FROM quota_samples WHERE resets_at IS NOT NULL AND duration_minutes > 0 ORDER BY captured_at")
                 .map_err(|e| e.to_string())?;
             let rows = stmt
                 .query_map([], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
                 })
                 .map_err(|e| e.to_string())?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(|e| e.to_string())?
         };
-        for (captured, kind, duration, reset, used) in samples {
-            self.record_limit_period("codex", None, &kind, duration as u64, reset, captured, used)?;
+        for (account, captured, kind, duration, reset, used) in samples {
+            self.record_limit_period_for(
+                &account,
+                "codex",
+                None,
+                &kind,
+                duration as u64,
+                reset,
+                captured,
+                used,
+            )?;
         }
         self.set_setting("limit_history_backfilled", "true")?;
         Ok(())
@@ -1908,5 +1925,37 @@ mod limit_tests {
             assert!(db.cached_account_usage("new-account").unwrap().is_none());
         }
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn backfill_keeps_the_quota_samples_original_account() {
+        let db = Db::test_db(None);
+        for (key, used) in [("a", 10.0), ("b", 80.0)] {
+            db.insert_quota_sample(
+                key,
+                1799999900,
+                "fiveHour",
+                Some(300),
+                used,
+                100.0 - used,
+                Some(1800000000),
+                "primary",
+            )
+            .unwrap();
+        }
+        db.backfill_limit_periods().unwrap();
+        for (key, used) in [("a", 10.0), ("b", 80.0)] {
+            let history = db
+                .get_limit_history_for(key, None, None, 0, 1800000001)
+                .unwrap();
+            assert_eq!(history.total, 1);
+            assert_eq!(history.periods[0].used_percent, used);
+        }
+        assert_eq!(
+            db.get_limit_history_for("default", None, None, 0, 1800000001)
+                .unwrap()
+                .total,
+            0
+        );
     }
 }
