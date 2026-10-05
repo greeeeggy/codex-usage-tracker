@@ -24,7 +24,15 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
-        .plugin(tauri_plugin_window_state::Builder::new().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                // Old saved states can enable a native caption over our custom title bar.
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        & !tauri_plugin_window_state::StateFlags::DECORATIONS,
+                )
+                .build(),
+        )
         .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {}))
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
@@ -179,6 +187,7 @@ pub fn run() {
 
             // Hide main window on startup (tray-only)
             if let Some(main_window) = app.get_webview_window("main") {
+                main_window.set_decorations(false)?;
                 let _ = main_window.hide();
 
                 // Intercept the close button — hide instead of exiting

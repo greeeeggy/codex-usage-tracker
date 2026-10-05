@@ -1,100 +1,39 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Minus, Square, X, Copy } from 'lucide-react';
 
 export function WindowTitleBar() {
   const [isMaximized, setIsMaximized] = useState(false);
-
   const appWindow = getCurrentWindow();
 
-  const handleMinimize = () => appWindow.minimize();
-  const handleToggleMaximize = async () => {
-    await appWindow.toggleMaximize();
-    setIsMaximized(await appWindow.isMaximized());
-  };
-  const handleClose = () => appWindow.hide();
+  useEffect(() => {
+    let disposed = false;
+    const update = async () => {
+      const maximized = await appWindow.isMaximized();
+      if (!disposed) setIsMaximized(maximized);
+    };
+    void update();
+    const unlisten = appWindow.onResized(() => { void update(); });
+    return () => { disposed = true; void unlisten.then(fn => fn()); };
+  }, []);
 
   return (
-    <div
-      className="flex items-center justify-between shrink-0 select-none"
-      style={{
-        height: 'var(--titlebar-height)',
-        background: 'var(--bg-titlebar)',
-        borderBottom: '1px solid var(--border-default)',
-      }}
-      data-tauri-drag-region
-    >
-      {/* Left: App identity */}
-      <div className="flex items-center gap-2 pl-4 pointer-events-none">
-        <div
-          className="w-5 h-5 rounded-md flex items-center justify-center"
-          style={{ background: 'var(--purple-dim)' }}
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--purple)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
-          </svg>
-        </div>
-        <span
-          className="text-xs font-semibold tracking-wide"
-          style={{ color: 'var(--text-secondary)' }}
-        >
-          Codex Meter
-        </span>
+    <div className="window-titlebar" data-tauri-drag-region role="toolbar" aria-label="Window controls">
+      <div className="window-brand" data-tauri-drag-region>
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" style={{ pointerEvents: 'none' }}>
+          <path d="M2 12V8m6 4V3m6 9V6" stroke="var(--accent)" strokeWidth="2" strokeLinecap="square" />
+        </svg>
+        <span data-tauri-drag-region>Codex Meter</span>
       </div>
-
-      {/* Right: Window controls */}
-      <div className="flex items-center h-full">
-        <button
-          onClick={handleMinimize}
-          className="h-full px-3.5 flex items-center justify-center transition-colors duration-150"
-          style={{ color: 'var(--text-muted)' }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = 'rgba(255,255,255,0.08)';
-            e.currentTarget.style.color = 'var(--text-primary)';
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = 'transparent';
-            e.currentTarget.style.color = 'var(--text-muted)';
-          }}
-          aria-label="Minimize window"
-          title="Minimize"
-        >
-          <Minus size={14} />
-        </button>
-        <button
-          onClick={handleToggleMaximize}
-          className="h-full px-3.5 flex items-center justify-center transition-colors duration-150"
-          style={{ color: 'var(--text-muted)' }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = 'rgba(255,255,255,0.08)';
-            e.currentTarget.style.color = 'var(--text-primary)';
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = 'transparent';
-            e.currentTarget.style.color = 'var(--text-muted)';
-          }}
-          aria-label={isMaximized ? 'Restore window' : 'Maximize window'}
-          title={isMaximized ? 'Restore' : 'Maximize'}
-        >
+      <div className="window-buttons">
+        <button onClick={() => appWindow.minimize()} aria-label="Minimize window" title="Minimize"><Minus size={14} /></button>
+        <button onClick={async () => {
+          await appWindow.toggleMaximize();
+          setIsMaximized(await appWindow.isMaximized());
+        }} aria-label={isMaximized ? 'Restore window' : 'Maximize window'} title={isMaximized ? 'Restore' : 'Maximize'}>
           {isMaximized ? <Copy size={12} /> : <Square size={12} />}
         </button>
-        <button
-          onClick={handleClose}
-          className="h-full px-3.5 flex items-center justify-center transition-colors duration-150"
-          style={{ color: 'var(--text-muted)' }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = 'rgba(255, 77, 94, 0.85)';
-            e.currentTarget.style.color = '#fff';
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = 'transparent';
-            e.currentTarget.style.color = 'var(--text-muted)';
-          }}
-          aria-label="Close window"
-          title="Close"
-        >
-          <X size={14} />
-        </button>
+        <button className="window-close" onClick={() => appWindow.hide()} aria-label="Close window" title="Close to tray"><X size={15} /></button>
       </div>
     </div>
   );

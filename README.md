@@ -19,6 +19,10 @@ codex login
 
 Start Meter after signing in. On Windows, Meter launches the native Codex executable directly, including installations made through npm. This fixes Windows error 740 when Command Prompt is configured to run as administrator; changing that Windows compatibility setting is unnecessary.
 
+The dashboard has one title bar with minimize, maximize/restore, and close controls. Closing keeps Meter running in the tray. Saved window size and position are restored; old settings cannot enable a second Windows title bar.
+
+The overview uses compact quota bars, a single token totals row, and a dated quota chart. Explanations of local/server coverage and cost estimates are available under **About these counts and estimates**.
+
 ## Accounts
 
 Meter detects the signed-in account and follows Codex sign-in changes automatically. Each account/workspace has separate quotas, recorded tokens, daily server totals, charts, chats, and history.
@@ -70,10 +74,14 @@ Meter's local server listens on `127.0.0.1:32145`:
 
 The [Windows GitHub Actions workflow](https://github.com/greeeeggy/codex-usage-tracker/actions/workflows/windows-build.yml) performs all application compilation on GitHub's Windows runners.
 
-It checks frontend types, runs Rust regression tests for account isolation, migration, pricing, log replay, and limit windows, initializes the real Codex app-server without Command Prompt, tests the dashboard in Chromium, builds both Windows executables, and verifies startup. The downloadable artifact includes both executables and their build manifest.
+It checks frontend types, runs Rust regression tests for account isolation, migration, pricing, log replay, and limit windows, initializes the real Codex app-server without Command Prompt, and tests the dashboard in Chromium at compact and wide sizes. It then builds both Windows executables and verifies that startup with an older decorated window state still produces one title bar. The downloadable artifact includes both executables and their build manifest.
 
 The app uses Tauri 2, Rust, SQLite, React, TypeScript, Tailwind CSS, and Zustand.
 
-## Version 0.3.0
+## Version 0.3.1
+
+Fixes duplicate window controls caused by restoring an old native title bar setting. The dashboard now has a neutral palette, smaller quota panels, flat token totals, working settings access, and a chart with an explicit height so observations remain visible. Account detection and separate usage/history remain available.
+
+### Version 0.3.0
 
 Automatic account detection and saved-account selection, separate account usage/history, recovery of identified local records, safe clearing on sign-out, and protection against delayed updates from a previous account. Includes the native Windows launch fix for error 740.

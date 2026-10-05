@@ -23,10 +23,13 @@ test.beforeEach(async ({ page }) => {
       { accountKey: 'default', label: 'Earlier history (unassigned)', email: null, planType: null, isLegacy: true },
     ];
     let active: string | null = 'account-a';
+    let maximized = false;
+    const windowCommands: string[] = [];
     Object.assign(globalThis, {
       __meterEmit: emit,
       __meterSignIn: (key: string | null) => { active = key; emit('accounts-updated', { activeAccount: profiles.find(p => p.accountKey === key) ?? null, accounts: profiles }); emit('state-changed', key ? 'monitoring' : 'authRequired'); },
       __meterDelayAccount: null,
+      __meterWindowCommands: windowCommands,
     });
     Object.assign(globalThis, { __TAURI_INTERNALS__: {
       metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
@@ -34,6 +37,12 @@ test.beforeEach(async ({ page }) => {
       unregisterCallback: (callback: number) => callbacks.delete(callback),
       invoke: async (command: string, args: Record<string, unknown> = {}) => {
         if (command === 'plugin:event|listen') { const list = listeners.get(args.event as string) ?? []; list.push(args.handler as number); listeners.set(args.event as string, list); return ++id; }
+        if (command === 'plugin:window|is_maximized') return maximized;
+        if (command.startsWith('plugin:window|')) {
+          windowCommands.push(command);
+          if (command === 'plugin:window|toggle_maximize') { maximized = !maximized; emit('tauri://resize', {}); }
+          return null;
+        }
         const key = args.accountKey as string;
         const other = key === 'account-b';
         const localTokens = other ? { ...tokens, inputTokens: 4500, totalTokens: 5000 } : tokens;
@@ -43,12 +52,21 @@ test.beforeEach(async ({ page }) => {
           if (key === (globalThis as unknown as { __meterDelayAccount: string | null }).__meterDelayAccount) await new Promise(resolve => globalThis.setTimeout(resolve, 1200));
           if (key === '__signed_out__' || key === 'default') return null;
           const scopedWindow = other ? { ...window, usedPercent: 70, remainingPercent: 30 } : window;
-          return { accountKey: key, capturedAt: new Date().toISOString(), limitId: 'codex', limitName: null, planType: other ? 'pro' : 'plus', windows: [scopedWindow], limits: [{ limitId: 'codex', limitName: null, windows: [scopedWindow] }], credits: null };
+          const weekly = { ...scopedWindow, source: 'secondary', name: 'weekly', durationMinutes: 10080, usedPercent: other ? 75 : 40, remainingPercent: other ? 25 : 60, resetsAt: new Date((reset + 432000) * 1000).toISOString() };
+          return { accountKey: key, capturedAt: new Date().toISOString(), limitId: 'codex', limitName: null, planType: other ? 'pro' : 'plus', windows: [scopedWindow, weekly], limits: [{ limitId: 'codex', limitName: null, windows: [scopedWindow, weekly] }], credits: null };
         }
         if (command === 'get_token_totals') return { accountKey: key, currentSession: localTokens, fiveHourWindow: localTokens, weeklyWindow: localTokens, today: localTokens, currentMonth: localTokens, allTimeRecorded: localTokens };
         if (command === 'get_account_usage') return key === '__signed_out__' ? null : { accountKey: key, summary: { lifetimeTokens: other ? 90000 : (globalThis as unknown as { __meterAccountTokens?: number }).__meterAccountTokens ?? 9000 }, dailyUsageBuckets: [{ startDate: '2026-10-02', tokens: other ? 80000 : 8000 }], fetchedAt: Math.floor(Date.now() / 1000) };
         if (command === 'get_account_usage_days') return key === '__signed_out__' ? { days: [], total: 0 } : { days: [{ startDate: '2026-10-02', tokens: other ? 80000 : 8000, observedAt: Math.floor(Date.now() / 1000) }], total: 1 };
-        if (command === 'get_quota_history' || command === 'get_recent_events' || command === 'get_chat_sessions') return [];
+        if (command === 'get_current_chat_summary') return key === '__signed_out__' ? null : { accountKey: key, id: 'fixture-chat', title: 'Example chat', model: 'future-model', reasoningEffort: 'high', usage: { ...localTokens, cacheWriteInputTokens: 0 }, cacheRate: 33.3, estimatedCostUsd: 0.02, updatedAt: reset - 3600, turnCount: 1, requestCount: 1, isCurrent: true };
+        if (command === 'get_quota_history') {
+          const mode = (globalThis as unknown as { __meterHistoryMode?: string }).__meterHistoryMode;
+          if (key === '__signed_out__' || mode === 'empty') return [];
+          const points = [30, 35, 40].map((value, index) => ({ capturedAt: reset - 10800 + index * 3600, windowKind: 'weekly', usedPercent: other ? value + 35 : value, remainingPercent: other ? 65 - value : 100 - value }));
+          return mode === 'single' ? points.slice(-1) : points;
+        }
+        if (command === 'get_recent_events') return [{ eventType: 'connected', label: 'Connected to Codex', timestamp: '19:39:56' }, { eventType: 'monitor_started', label: 'Monitoring started', timestamp: '19:39:55' }];
+        if (command === 'get_chat_sessions') return [];
         if (command === 'get_limit_history') { const base = key === '__signed_out__' ? [] : other ? periods.slice(0, 1).map(p => ({ ...p, usedPercent: 70, tokens: localTokens })) : periods; const rows = base.filter(p => (!args.limitId || p.limitId === args.limitId) && (!args.windowKind || p.windowKind === args.windowKind)); return { periods: rows, total: rows.length }; }
         if (command === 'get_pricing') return catalog;
         if (command === 'refresh_pricing') { catalog.models['future-model'].standard.input = 3; emit('pricing-updated', catalog); return catalog; }
@@ -57,6 +75,54 @@ test.beforeEach(async ({ page }) => {
       },
     } });
   });
+});
+
+test('One title bar sends minimize, maximize, restore and close-to-tray actions', async ({ page }) => {
+  await page.goto('/');
+  const controls = page.getByRole('toolbar', { name: 'Window controls' });
+  await expect(controls).toHaveCount(1);
+  await expect(controls.getByRole('button')).toHaveCount(3);
+  await expect(page.getByText('Codex Meter', { exact: true })).toHaveCount(1);
+  await controls.getByRole('button', { name: 'Maximize window' }).click();
+  await expect(controls.getByRole('button', { name: 'Restore window' })).toBeVisible();
+  await controls.getByRole('button', { name: 'Restore window' }).click();
+  await expect(controls.getByRole('button', { name: 'Maximize window' })).toBeVisible();
+  await controls.getByRole('button', { name: 'Minimize window' }).click();
+  await controls.getByRole('button', { name: 'Close window' }).click();
+  const commands = await page.evaluate(() => (globalThis as unknown as { __meterWindowCommands: string[] }).__meterWindowCommands);
+  expect(commands).toEqual(['plugin:window|toggle_maximize', 'plugin:window|toggle_maximize', 'plugin:window|minimize', 'plugin:window|hide']);
+});
+
+for (const viewport of [{ width: 900, height: 650 }, { width: 1920, height: 1080 }]) {
+  test(`Overview shows both quotas and a visible weekly plot at ${viewport.width}px`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto('/');
+    await expect(page.getByRole('progressbar', { name: '5-hour quota remaining' })).toHaveAttribute('aria-valuenow', '80');
+    await expect(page.getByRole('progressbar', { name: 'Weekly quota remaining' })).toHaveAttribute('aria-valuenow', '60');
+    await expect(page.getByRole('region', { name: 'Tokens used' }).getByText('Lifetime · server', { exact: true })).toBeVisible();
+    const chart = page.getByRole('region', { name: 'Weekly quota observations' });
+    await expect(chart.locator('.recharts-line-curve')).toBeVisible();
+    await expect(chart.getByText('100%', { exact: true })).toBeVisible();
+    const plot = await chart.locator('.recharts-surface').boundingBox();
+    expect(plot?.height).toBeGreaterThan(150);
+    const horizontalOverflow = await page.locator('main').evaluate(el => el.scrollWidth > el.clientWidth);
+    expect(horizontalOverflow).toBe(false);
+    await page.screenshot({ path: `test-results/overview-${viewport.width}.png`, fullPage: true });
+    await page.getByRole('button', { name: 'Open settings', exact: true }).click();
+    await expect(page.getByRole('heading', { level: 1, name: 'Settings', exact: true })).toBeVisible();
+  });
+}
+
+test('A single weekly observation renders a dot; an empty history explains the gap', async ({ page }) => {
+  await page.addInitScript(() => Object.assign(globalThis, { __meterHistoryMode: 'single' }));
+  await page.goto('/');
+  const chart = page.getByRole('region', { name: 'Weekly quota observations' });
+  await expect(chart.locator('.recharts-line-dot')).toBeVisible();
+  await page.screenshot({ path: 'test-results/weekly-single-observation.png', fullPage: true });
+  await page.evaluate(() => Object.assign(globalThis, { __meterHistoryMode: 'empty' }));
+  await page.getByRole('button', { name: 'Refresh usage data' }).click();
+  await expect(chart.getByText('No quota observations yet', { exact: true })).toBeVisible();
+  await expect(chart.getByText('History builds while Meter is running.', { exact: true })).toBeVisible();
 });
 
 test('Limits retains completed windows, token totals, and bucket filters', async ({ page }) => {

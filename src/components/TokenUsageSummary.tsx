@@ -1,5 +1,4 @@
 import { useUsageStore } from '../stores/usageStore';
-import { Hash } from 'lucide-react';
 import { AccountUsage, ChatSessionSummary, TokenTotals } from '../types/usage';
 import { formatNumber, formatUsd } from '../utils/cn';
 import { lifetimeCoverage } from '../utils/usageCoverage';
@@ -19,105 +18,32 @@ export function TokenUsageSummary({ accountUsage, tokenTotals, currentChat }: To
     { label: '5-hour · local', value: tokenTotals?.fiveHourWindow.totalTokens ?? null },
     { label: 'Weekly · local', value: tokenTotals?.weeklyWindow.totalTokens ?? null },
     { label: 'Today · local', value: tokenTotals?.today.totalTokens ?? null },
-    { label: usableReport ? 'Lifetime · server' : 'Lifetime · local', value: lifetimeTokens, accent: true },
+    { label: usableReport ? 'Lifetime · server' : 'Lifetime · local', value: lifetimeTokens },
   ];
-
   return (
-    <section
-      className="rounded-xl p-5"
-      style={{ background: 'var(--bg-card)', border: '1px solid var(--border-default)' }}
-      aria-label="Tokens used"
-    >
-      <div className="flex items-center justify-between gap-4 mb-4">
-        <div className="flex items-center gap-2">
-          <Hash size={16} style={{ color: 'var(--purple)' }} />
-          <h3 className="text-[15px] font-semibold" style={{ color: 'var(--text-primary)' }}>
-            Tokens Used
-          </h3>
-        </div>
-        <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-          {usableReport ? 'Lifetime reported by Codex' : 'Local totals · account total unavailable or incomplete'}
-        </span>
+    <section className="token-panel" aria-label="Tokens used">
+      <div className="section-heading">
+        <h2>Tokens</h2>
+        <span>{usableReport ? 'Lifetime reported by Codex' : 'Local totals · account total unavailable or incomplete'}</span>
       </div>
-
-      {currentChat && (
-        <div
-          className="rounded-lg px-4 py-3 mb-3 grid grid-cols-2 md:grid-cols-5 gap-3"
-          style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}
-        >
-          <div className="col-span-2 md:col-span-1 min-w-0">
-            <span className="text-[10px] uppercase tracking-wider block mb-1" style={{ color: 'var(--text-muted)' }}>
-              Model
-            </span>
-            <span className="text-sm font-semibold truncate block" style={{ color: 'var(--text-primary)' }}>
-              {currentChat.model ?? 'Unknown'}
-              {currentChat.reasoningEffort ? ` · ${currentChat.reasoningEffort}` : ''}
-            </span>
-          </div>
-          <div>
-            <span className="text-[10px] uppercase tracking-wider block mb-1" style={{ color: 'var(--text-muted)' }}>
-              Input
-            </span>
-            <span className="text-sm font-mono font-semibold" style={{ color: 'var(--text-primary)' }}>
-              {formatNumber(currentChat.usage.inputTokens)}
-            </span>
-          </div>
-          <div>
-            <span className="text-[10px] uppercase tracking-wider block mb-1" style={{ color: 'var(--text-muted)' }}>
-              Output
-            </span>
-            <span className="text-sm font-mono font-semibold" style={{ color: 'var(--text-primary)' }}>
-              {formatNumber(currentChat.usage.outputTokens)}
-            </span>
-          </div>
-          <div>
-            <span className="text-[10px] uppercase tracking-wider block mb-1" style={{ color: 'var(--text-muted)' }}>
-              Cache rate
-            </span>
-            <span className="text-sm font-mono font-semibold" style={{ color: 'var(--green)' }}>
-              {currentChat.cacheRate.toFixed(1)}%
-            </span>
-          </div>
-          <div>
-            <span className="text-[10px] uppercase tracking-wider block mb-1" style={{ color: 'var(--text-muted)' }}>
-              API est.
-            </span>
-            <span className="text-sm font-mono font-semibold" style={{ color: 'var(--purple-bright)' }}>
-              {formatUsd(currentChat.estimatedCostUsd)}
-            </span>
-          </div>
-        </div>
-      )}
-
-      <p className="text-[11px] mb-3" style={{ color: 'var(--text-muted)' }}>
-        {pricing?.fetchedAt ? `Standard API estimates · Prices updated ${new Date(pricing.fetchedAt * 1000).toLocaleString()}${pricing.lastError ? ' · Using saved prices' : ''}` : 'Prices unavailable until the first successful update'}
-      </p>
-      <p className="text-[11px] mb-3" style={{ color: 'var(--text-muted)' }}>Shared quota includes web/cloud activity. Window token counts cover local requests with limit attribution; exact remote window tokens are not provided.</p>
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        {metrics.map((metric) => (
-          <div
-            key={metric.label}
-            className="rounded-lg px-4 py-3 min-w-0"
-            style={{
-              background: metric.accent ? 'var(--purple-dim)' : 'var(--bg-elevated)',
-              border: metric.accent
-                ? '1px solid rgba(139, 92, 246, 0.28)'
-                : '1px solid var(--border-subtle)',
-            }}
-          >
-            <span className="text-[11px] block mb-1 truncate" style={{ color: 'var(--text-muted)' }}>
-              {metric.label}
-            </span>
-            <span
-              className="text-xl font-semibold tabular-nums block truncate"
-              style={{ color: metric.accent ? 'var(--purple-bright)' : 'var(--text-primary)' }}
-              title={metric.value !== null ? `${metric.value.toLocaleString()} tokens` : 'No data'}
-            >
-              {metric.value !== null ? formatNumber(metric.value) : '—'}
-            </span>
-          </div>
-        ))}
-      </div>
+      <dl className="token-metrics">
+        {metrics.map(metric => <div key={metric.label}>
+          <dt>{metric.label}</dt>
+          <dd title={metric.value !== null ? metric.value.toLocaleString() + ' tokens' : 'Unavailable'}>{metric.value !== null ? formatNumber(metric.value) : '—'}</dd>
+        </div>)}
+      </dl>
+      {currentChat && <div className="chat-usage-row" aria-label="Current chat breakdown">
+        <span className="chat-model">{currentChat.model ?? 'Unknown model'}{currentChat.reasoningEffort ? ' · ' + currentChat.reasoningEffort : ''}</span>
+        <span>Input <b>{formatNumber(currentChat.usage.inputTokens)}</b></span>
+        <span>Output <b>{formatNumber(currentChat.usage.outputTokens)}</b></span>
+        <span>Cache <b>{currentChat.cacheRate.toFixed(1)}%</b></span>
+        <span>API estimate <b>{formatUsd(currentChat.estimatedCostUsd)}</b></span>
+      </div>}
+      <details className="usage-notes">
+        <summary>About these counts and estimates</summary>
+        <p>Quota is shared across devices. Window token counts cover local requests with limit attribution; exact remote tokens per window are unavailable. Five-hour and weekly totals overlap. Server totals include local activity.</p>
+        <p>{pricing?.fetchedAt ? 'API estimates use standard published prices, updated ' + new Date(pricing.fetchedAt * 1000).toLocaleString() + (pricing.lastError ? '. Using saved prices.' : '.') : 'API prices are unavailable until the first successful update.'} Estimates are separate from subscription charges.</p>
+      </details>
     </section>
   );
 }

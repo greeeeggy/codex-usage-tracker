@@ -1,6 +1,6 @@
 [package]
 name = "codex-meter"
-version = "0.3.0"
+version = "0.3.1"
 description = "Codex Usage Monitor — track your Codex rate limits in real-time"
 authors = ["you"]
 edition = "2021"

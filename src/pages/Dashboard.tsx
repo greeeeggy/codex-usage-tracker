@@ -5,7 +5,6 @@ import { WeeklyLimitCard } from '../components/WeeklyLimitCard';
 import { WeeklyUsageChart } from '../components/HistoryCharts';
 import { MetricCardGrid } from '../components/MetricCardGrid';
 import { RecentEventsCard } from '../components/RecentEventsCard';
-import { LimitSummaryCard } from '../components/LimitSummaryCard';
 import { TokenUsageSummary } from '../components/TokenUsageSummary';
 import { LimitPeriodHistory } from '../components/LimitPeriodHistory';
 import { AccountUsageCoverage } from '../components/AccountUsageCoverage';
@@ -60,7 +59,7 @@ export function Dashboard() {
   // Error / auth required state
   if (!savedAccount && (monitorState === 'error' || monitorState === 'authRequired') && !['limits', 'history', 'settings'].includes(activePage)) {
     return (
-      <div className="h-full p-6">
+      <div className="dashboard-content">
         <DashboardHeader />
         <div
           className="rounded-2xl p-10 text-center flex flex-col items-center justify-center"
@@ -299,7 +298,7 @@ export function Dashboard() {
               <h3 className="text-sm font-semibold uppercase tracking-wider mb-3" style={{ color: 'var(--text-muted)' }}>
                 Weekly quota history
               </h3>
-              <WeeklyUsageChart data={quotaHistory.map(h => ({ timestamp: new Date(h.capturedAt * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), value: h.usedPercent }))} />
+              <WeeklyUsageChart data={quotaHistory.map(h => ({ timestamp: h.capturedAt * 1000, value: h.usedPercent }))} />
             </div>
           </div>
         );
@@ -426,9 +425,9 @@ export function Dashboard() {
       case 'overview':
       default:
         return (
-          <div className="space-y-4">
+          <div className="overview-layout">
             {/* Both quota windows are primary information. */}
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <div className="quota-grid">
               <WeeklyLimitCard window={fiveHourWindow} compact />
               <WeeklyLimitCard window={weeklyWindow} compact />
             </div>
@@ -436,36 +435,29 @@ export function Dashboard() {
             <TokenUsageSummary accountUsage={accountUsage} tokenTotals={tokenTotals} currentChat={currentChat} />
 
             {/* Row: Chart + Metric cards */}
-            <div className="grid grid-cols-1 xl:grid-cols-5 gap-4">
-              <div className="xl:col-span-3">
+            <div className="overview-history">
+              <div>
                 <WeeklyUsageChart
                   data={quotaHistory.map(h => ({
-                    timestamp: new Date(h.capturedAt * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                    timestamp: h.capturedAt * 1000,
                     value: h.usedPercent,
                   }))}
                   onViewHistory={() => setActivePage('history')}
                 />
               </div>
-              <div className="xl:col-span-2">
+              <div>
                 <MetricCardGrid tokenTotals={tokenTotals} usageDeltas={usageDeltas} />
               </div>
             </div>
 
-            {/* Row: Recent Events + Limit Summary */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <RecentEventsCard events={recentEvents as any} />
-              <LimitSummaryCard
-                fiveHourWindow={fiveHourWindow}
-                weeklyWindow={weeklyWindow}
-              />
-            </div>
+            <RecentEventsCard events={recentEvents} />
           </div>
         );
     }
   };
 
   return (
-    <div className="p-6 space-y-4" style={{ animation: 'fade-in 300ms ease-out' }}>
+    <div className="dashboard-content space-y-4">
       <DashboardHeader />
       {savedAccount && <p className="text-sm" style={{ color: 'var(--text-muted)' }}>
         Showing saved usage for this account. Sign into it in Codex to update its quotas.

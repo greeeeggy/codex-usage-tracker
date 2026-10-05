@@ -1,131 +1,34 @@
-import {
-  AreaChart,
-  Area,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-} from 'recharts';
-import { ChevronRight } from 'lucide-react';
-
-interface ChartDataPoint {
-  timestamp: string;
-  value: number;
-}
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 interface WeeklyUsageChartProps {
-  data: ChartDataPoint[];
+  data: { timestamp: number; value: number }[];
   onViewHistory?: () => void;
 }
 
 export function WeeklyUsageChart({ data, onViewHistory }: WeeklyUsageChartProps) {
-  const hasData = data.length > 0;
-
+  const single = data.length === 1;
   return (
-    <div
-      className="rounded-xl p-5 flex flex-col"
-      style={{
-        background: 'var(--bg-card)',
-        border: '1px solid var(--border-default)',
-        minHeight: 260,
-      }}
-    >
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-3">
-          <span className="text-[15px] font-semibold" style={{ color: 'var(--text-primary)' }}>
-            Usage This Week
-          </span>
-          {hasData && (
-            <div className="flex items-center gap-1.5">
-              <div className="w-2 h-2 rounded-full" style={{ background: 'var(--purple)' }} />
-              <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>Quota used (%)</span>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Chart or empty state */}
-      {hasData ? (
-        <div className="flex-1" style={{ minHeight: 180 }}>
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={data} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
-              <defs>
-                <linearGradient id="usageGradient" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="var(--purple)" stopOpacity={0.25} />
-                  <stop offset="95%" stopColor="var(--purple)" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid
-                strokeDasharray="3 3"
-                stroke="rgba(255,255,255,0.04)"
-                vertical={false}
-              />
-              <XAxis
-                dataKey="timestamp"
-                stroke="transparent"
-                tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
-                tickLine={false}
-                axisLine={false}
-              />
-              <YAxis
-                stroke="transparent"
-                tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
-                tickLine={false}
-                axisLine={false}
-                width={40}
-                domain={[0, 100]}
-                tickFormatter={(value) => `${value}%`}
-              />
-              <Tooltip
-                contentStyle={{
-                  backgroundColor: 'var(--bg-elevated)',
-                  border: '1px solid var(--border-default)',
-                  borderRadius: '8px',
-                  fontSize: '12px',
-                }}
-                itemStyle={{ color: 'var(--text-primary)' }}
-                labelStyle={{ color: 'var(--text-muted)' }}
-              />
-              <Area
-                type="monotone"
-                dataKey="value"
-                stroke="var(--purple)"
-                strokeWidth={2}
-                fillOpacity={1}
-                fill="url(#usageGradient)"
-                dot={false}
-                activeDot={{ r: 5, fill: 'var(--purple-bright)', strokeWidth: 2, stroke: 'var(--bg-card)' }}
-              />
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
-      ) : (
-        <div
-          className="flex-1 flex flex-col items-center justify-center rounded-lg"
-          style={{ background: 'rgba(255,255,255,0.02)' }}
-        >
-          <span className="text-sm mb-1" style={{ color: 'var(--text-muted)' }}>
-            No usage data this week
-          </span>
-          <span className="text-[11px]" style={{ color: 'var(--text-faint)' }}>
-            Usage history will appear after your first monitored session
-          </span>
-        </div>
-      )}
-
-      {onViewHistory && (
-        <button
-          className="flex items-center gap-1 text-[12px] font-medium mt-3 self-start transition-colors duration-150 cursor-pointer"
-          style={{ color: 'var(--text-muted)' }}
-          onClick={onViewHistory}
-          onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--text-primary)'; }}
-          onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted)'; }}
-        >
-          View full history <ChevronRight size={12} />
-        </button>
-      )}
-    </div>
+    <section className="chart-panel" aria-label="Weekly quota observations">
+      <div className="chart-heading"><h2>Weekly quota</h2><span>Observed usage · % of allowance</span></div>
+      {data.length ? <ResponsiveContainer width="100%" height={180}>
+        <LineChart data={data} margin={{ top: 12, right: 10, left: -18, bottom: 0 }}>
+          <CartesianGrid stroke="var(--border-subtle)" vertical={false} />
+          <XAxis dataKey="timestamp" type="number" scale="time"
+            domain={single ? [data[0].timestamp - 1_800_000, data[0].timestamp + 1_800_000] : ['dataMin', 'dataMax']}
+            minTickGap={36} tickLine={false} axisLine={false}
+            tick={{ fill: 'var(--text-muted)', fontSize: 10 }}
+            tickFormatter={value => new Date(value).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} />
+          <YAxis domain={[0, 100]} ticks={[0, 25, 50, 75, 100]} width={42} tickLine={false} axisLine={false}
+            tick={{ fill: 'var(--text-muted)', fontSize: 10 }} tickFormatter={value => value + '%'} />
+          <Tooltip labelFormatter={value => new Date(Number(value)).toLocaleString()}
+            formatter={value => [Number(value).toFixed(1) + '%', 'Quota used']}
+            contentStyle={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-default)', borderRadius: 4, fontSize: 12 }}
+            itemStyle={{ color: 'var(--text-primary)' }} labelStyle={{ color: 'var(--text-secondary)' }} />
+          <Line dataKey="value" type="linear" stroke="var(--accent)" strokeWidth={2}
+            dot={single ? { r: 3 } : false} activeDot={{ r: 3 }} isAnimationActive={false} />
+        </LineChart>
+      </ResponsiveContainer> : <div className="chart-empty">No quota observations yet<span>History builds while Meter is running.</span></div>}
+      {onViewHistory && <button className="text-link chart-footer" onClick={onViewHistory}>View history →</button>}
+    </section>
   );
 }
