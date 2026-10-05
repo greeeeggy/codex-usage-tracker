@@ -589,4 +589,58 @@ mod replay_tests {
             std::fs::remove_file(path).unwrap();
         }
     }
+
+    #[test]
+    fn cross_account_forks_keep_original_requests_with_the_original_account() {
+        let parent = std::env::temp_dir().join(format!("rollout-{}.jsonl", uuid::Uuid::new_v4()));
+        let child = std::env::temp_dir().join(format!("rollout-{}.jsonl", uuid::Uuid::new_v4()));
+        let header = |account: &str| {
+            serde_json::json!({"type":"session_meta","payload":{"creator_account_id":account,"creator_user_id":"user"}}).to_string()
+        };
+        let context = |turn: &str| {
+            serde_json::json!({"type":"turn_context","payload":{"turn_id":turn}}).to_string()
+        };
+        let original_turn = uuid::Uuid::new_v4().to_string();
+        std::fs::write(
+            &parent,
+            format!(
+                "{}\n{}\n{}\n",
+                header("a"),
+                context(&original_turn),
+                row("2027-01-15T07:59:00Z", 100, 100)
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &child,
+            format!(
+                "{}\n{}\n{}\n{}\n{}\n",
+                header("b"),
+                context(&original_turn),
+                row("2027-01-15T07:59:20Z", 100, 100),
+                context(&uuid::Uuid::new_v4().to_string()),
+                row("2027-01-15T07:59:30Z", 150, 50)
+            ),
+        )
+        .unwrap();
+        for order in [[&parent, &child], [&child, &parent]] {
+            let db = Db::test_db(None);
+            for path in order {
+                import_batch(&db, path).unwrap();
+            }
+            for (account, total) in [("a", 100), ("b", 50)] {
+                let key = crate::accounts::identity(account, "user").account_key;
+                assert_eq!(
+                    db.get_token_totals(&key, 0, 0, i64::MAX, 0, i64::MAX)
+                        .unwrap()
+                        .all_time_recorded
+                        .total_tokens,
+                    total
+                );
+            }
+        }
+        for path in [parent, child] {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
 }
