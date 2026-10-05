@@ -422,6 +422,7 @@ impl UsageService {
                         }
                         CodexEvent::AccountChanged => { reconnect = true; }
                         CodexEvent::Disconnected => {
+                            if client.is_none() { continue; }
                             reconnect = true;
                             log::warn!("Codex app-server disconnected");
                             client = None;
