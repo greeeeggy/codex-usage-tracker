@@ -11,7 +11,7 @@ export function WeeklyUsageChart({ data, onViewHistory }: WeeklyUsageChartProps)
     <section className="chart-panel" aria-label="Weekly quota observations">
       <div className="chart-heading"><h2>Weekly quota</h2><span>Observed usage · % of allowance</span></div>
       {data.length ? <ResponsiveContainer width="100%" height={180}>
-        <LineChart data={data} margin={{ top: 12, right: 10, left: -18, bottom: 0 }}>
+        <LineChart data={data} margin={{ top: 12, right: 10, left: 0, bottom: 0 }}>
           <CartesianGrid stroke="var(--border-subtle)" vertical={false} />
           <XAxis dataKey="timestamp" type="number" scale="time"
             domain={single ? [data[0].timestamp - 1_800_000, data[0].timestamp + 1_800_000] : ['dataMin', 'dataMax']}
@@ -27,7 +27,7 @@ export function WeeklyUsageChart({ data, onViewHistory }: WeeklyUsageChartProps)
           <Line dataKey="value" type="linear" stroke="var(--accent)" strokeWidth={2}
             dot={single ? { r: 3 } : false} activeDot={{ r: 3 }} isAnimationActive={false} />
         </LineChart>
-      </ResponsiveContainer> : <div className="chart-empty">No quota observations yet<span>History builds while Meter is running.</span></div>}
+      </ResponsiveContainer> : <div className="chart-empty"><p>No quota observations yet</p><span>History builds while Meter is running.</span></div>}
       {onViewHistory && <button className="text-link chart-footer" onClick={onViewHistory}>View history →</button>}
     </section>
   );

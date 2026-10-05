@@ -118,6 +118,7 @@ button:focus:not(:focus-visible) { outline: none; }
 .chart-panel { padding: 18px 20px 12px; min-width: 0; }
 .chart-heading { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 12px; font-size: 11px; color: var(--text-muted); }
 .chart-empty { height: 180px; display: flex; flex-direction: column; gap: 6px; justify-content: center; color: var(--text-secondary); font-size: 13px; }
+.chart-empty p { margin: 0; }
 .chart-empty span { color: var(--text-muted); font-size: 12px; }
 .chart-footer { display: block; margin-top: 8px; font-size: 11px; }
 .monitor-panel { padding: 18px 20px; }

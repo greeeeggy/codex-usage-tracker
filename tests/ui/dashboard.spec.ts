@@ -108,6 +108,8 @@ for (const viewport of [{ width: 900, height: 650 }, { width: 1920, height: 1080
     const horizontalOverflow = await page.locator('main').evaluate(el => el.scrollWidth > el.clientWidth);
     expect(horizontalOverflow).toBe(false);
     await page.screenshot({ path: `test-results/overview-${viewport.width}.png`, fullPage: true });
+    await chart.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `test-results/weekly-chart-${viewport.width}.png`, fullPage: true });
     await page.getByRole('button', { name: 'Open settings', exact: true }).click();
     await expect(page.getByRole('heading', { level: 1, name: 'Settings', exact: true })).toBeVisible();
   });
@@ -119,8 +121,8 @@ test('A single weekly observation renders a dot; an empty history explains the g
   const chart = page.getByRole('region', { name: 'Weekly quota observations' });
   await expect(chart.locator('.recharts-line-dot')).toBeVisible();
   await page.screenshot({ path: 'test-results/weekly-single-observation.png', fullPage: true });
-  await page.evaluate(() => Object.assign(globalThis, { __meterHistoryMode: 'empty' }));
-  await page.getByRole('button', { name: 'Refresh usage data' }).click();
+  await page.addInitScript(() => Object.assign(globalThis, { __meterHistoryMode: 'empty' }));
+  await page.reload();
   await expect(chart.getByText('No quota observations yet', { exact: true })).toBeVisible();
   await expect(chart.getByText('History builds while Meter is running.', { exact: true })).toBeVisible();
 });
