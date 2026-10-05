@@ -609,9 +609,10 @@ dependencies = [
 
 [[package]]
 name = "codex-meter"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "chrono",
  "env_logger",
  "log",
@@ -619,6 +620,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "sysinfo",
  "tauri",
  "tauri-build",

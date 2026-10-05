@@ -234,6 +234,7 @@ function TurnCard({
 }
 
 export function ChatSessionHistory() {
+  const accountKey = useUsageStore(s => s.viewAccountKey);
   const pricingTimestamp = useUsageStore(s => s.pricing?.fetchedAt);
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -248,7 +249,7 @@ export function ChatSessionHistory() {
     setLoadingSessions(true);
     setError(null);
     try {
-      const rows = await invoke<ChatSessionSummary[]>('get_chat_sessions');
+      const rows = await invoke<ChatSessionSummary[]>('get_chat_sessions', { accountKey });
       setSessions(rows);
       setSelectedId((current) => current && rows.some((row) => row.id === current)
         ? current
@@ -262,7 +263,7 @@ export function ChatSessionHistory() {
 
   useEffect(() => {
     void loadSessions();
-  }, [pricingTimestamp]);
+  }, [accountKey, pricingTimestamp]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -272,7 +273,7 @@ export function ChatSessionHistory() {
     let cancelled = false;
     setLoadingDetail(true);
     setError(null);
-    invoke<ChatSessionDetail>('get_chat_session_detail', { sessionId: selectedId })
+    invoke<ChatSessionDetail>('get_chat_session_detail', { accountKey, sessionId: selectedId })
       .then((result) => {
         if (cancelled) return;
         setDetail(result);
@@ -288,7 +289,7 @@ export function ChatSessionHistory() {
     return () => {
       cancelled = true;
     };
-  }, [selectedId, pricingTimestamp]);
+  }, [accountKey, selectedId, pricingTimestamp]);
 
   const filteredSessions = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();

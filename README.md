@@ -1,59 +1,79 @@
 # Codex Meter
 
-A live, lightweight desktop monitor for the shared OpenAI Work/Codex usage allowance. Codex Meter runs in your system tray, records five-hour and weekly quota observations across desktop, CLI, IDE, web, cloud, and other clients using the same allowance, and alerts you when your quota is low.
+A Windows desktop monitor for your ChatGPT account's shared Work/Codex allowance. See five-hour and weekly quota, local token usage, saved limit periods, and estimated API-equivalent costs from a dashboard, floating widget, or system tray.
 
-## Features
+## Download and install
 
-- **Live Tracking**: Directly reads `codex app-server` data without API keys
-- **Account Monitoring**: Keeps polling shared quota while the monitor is running, including when no local Codex client is open
-- **Floating Widget**: Always-on-top compact desktop widget
-- **System Tray**: Quick access to usage data and settings
-- **Desktop Alerts**: Notifications at 25%, 10%, and 5% remaining
-- **OBS Integration**: Built-in HTTP server provides a transparent overlay (`http://127.0.0.1:32145/overlay`)
-- **Rainmeter Ready**: JSON API available at `http://127.0.0.1:32145/api/usage`
+Get the latest Windows build from [GitHub Releases](https://github.com/greeeeggy/codex-usage-tracker/releases/latest).
 
-## Prerequisites
+- **Codex-Meter-setup.exe** installs Meter and its shortcuts.
+- **Codex-Meter.exe** runs without an installer.
+- **build-info.json** identifies the source commit and includes SHA-256 hashes for both executables.
 
-Codex Meter depends on the official OpenAI Codex CLI to read your ChatGPT-authenticated usage quota.
+Meter requires the official Codex CLI and a ChatGPT sign-in:
 
-```bash
-# Install the official Codex CLI
+```powershell
 npm install -g @openai/codex
-
-# Authenticate with your ChatGPT account
 codex login
 ```
 
-On Windows, Meter launches the native `codex.exe` directly from the npm installation or PATH. It supports current nested and hoisted platform packages and older bundled binaries. This avoids the npm command shim and fixes error 740 when Command Prompt is configured to run as administrator. Existing Windows compatibility settings do not need to change.
+Start Meter after signing in. On Windows, Meter launches the native Codex executable directly, including installations made through npm. This fixes Windows error 740 when Command Prompt is configured to run as administrator; changing that Windows compatibility setting is unnecessary.
 
-## Running locally
+## Accounts
 
-```bash
-# Install dependencies
-npm install
+Meter detects the signed-in account and follows Codex sign-in changes automatically. Each account/workspace has separate quotas, recorded tokens, daily server totals, charts, chats, and history.
 
-# Run the Tauri development app
-npm run tauri dev
-```
+The **Account** menu offers:
 
-## Architecture
+- **Signed-in account**: follows the account currently signed into the CLI's configured `CODEX_HOME`, with fresh quotas.
+- **A saved account**: shows that account's stored records and the time they were last observed. Sign into it in Codex to refresh its quotas.
+- **Earlier history (unassigned)**: retains older records whose owner cannot be established.
 
-Codex Meter is built with:
-- **Tauri 2**: Lightweight Rust desktop framework
-- **React + TypeScript**: Frontend UI
-- **Tailwind CSS v4**: Styling
-- **Zustand**: State management
+Selecting an account in Meter does not log into it or change Codex credentials. Signing out clears the previous account's live display. The floating widget and local overlay always follow the signed-in account.
 
-## Pricing and limit history (0.2.1)
+Meter identifies users and account/workspaces by a hashed combination of their IDs. Plan or email changes do not split an ID-backed account. It reads only identity information from local credentials and saves the account key, display email, and plan; tokens and passwords are never stored in Meter's database or sent to its UI.
 
-- Prices are fetched from the official OpenAI pricing Markdown every six hours, with hourly retry after failures. Model names and rates are discovered from the published standard text-token tables. No API key is required. Settings shows all discovered models, freshness, and a manual update button. A failed update retains the last successful SQLite cache; missing prices stay unavailable rather than falling back to another model.
-- Cost estimates use standard API rates, including published cache-write and long-context rates. Subscription quota is separate. Session summary estimates use aggregate base rates; per-request details apply the long-context threshold. Pricing updates invalidate saved session summaries.
-- Limits shows one summary per actual five-hour, weekly, or other reported cycle for every limit bucket: start, reset, total recorded tokens, and latest observed account-wide quota consumed. The token breakdown is available on hover. Reset estimates changing during an unexpired cycle update its observations instead of creating overlapping rows; its first observed boundary stays stable. The first valid observation at or after that reset starts a new cycle. A newly reported start more than five minutes after the previous observation detects an early allowance refresh and closes the previous cycle at that start; smaller timestamp jitter and quota percentage changes alone do not create cycles. Empty gaps are not invented. Completed cycles survive resets and restarts, and filters/pagination preserve older history.
-- Upgrading automatically consolidates the duplicate period rows from 0.2.0. Original quota observations and request records remain saved. Summaries replay in timestamp order, so importing older logs or restarting yields the same cycles; token intervals within each bucket/window do not overlap.
-- Rollout logs are replayed from durable byte checkpoints, including archived sessions. Token accounting uses original request timestamps and half-open intervals `[start, reset)`, so boundary requests enter the new period. Shared turn/counter identities deduplicate copied fork history and retain the earliest original timestamp. Repeated cumulative notifications are ignored, incomplete lines are retried, and token rows/checkpoints commit together. App-server token notifications are not added a second time.
-- Shared quota monitoring includes Work/Codex, web/cloud, other devices, and connected clients consuming the same allowance. It does not depend on detecting a local window. Server-reported account lifetime/day token activity is fetched separately, cached, and retained by reported day; repeat observations replace each day's total instead of adding to it. Limits displays this activity separately from local request totals. A server lifetime summary below local usage, or zero while quota is used, is flagged as incomplete and cannot replace recorded usage with a misleading zero. Ordinary Chat conversations and separately billed API activity are not collected.
-- Period token totals cover available local requests with shared-limit attribution. Rows lacking this attribution and old unscoped aggregates are retained but excluded from these totals. Exact remote per-period tokens, deleted logs, and observations missed while the monitor is closed cannot be reconstructed from the supported API. Daily account totals cannot be split reliably across arbitrary five-hour/weekly boundaries or model buckets. Five-hour and weekly views overlap; account and local totals must not be added together. Quota percentages are never converted into invented token totals. See the [official account usage and rate-limit API](https://learn.chatgpt.com/docs/app-server).
+Newer local session headers include ownership IDs, allowing Meter to recover the matching account's history. Older combined records stay unassigned rather than being guessed to belong to the current account. Keychain installations exposing only an email use a separate email-based identity; an email alone cannot establish workspace ownership.
 
-## GitHub Windows builds
+## Usage and history
 
-The `Test and build Windows executable` workflow checks frontend types, runs Rust regression tests (including the live pricing source), checks the Limits/pricing screens in Chromium, builds a Windows executable and NSIS installer, and confirms the executable starts. The `Codex-Meter-Windows` artifact contains `Codex-Meter.exe`, `Codex-Meter-setup.exe`, and a build manifest with the source commit and SHA-256 hashes. This workflow performs all application compilation on GitHub Actions.
+- Shared quotas are read from `codex app-server`, including allowance consumed through other devices and clients. Polling continues while Meter runs, even with no local Codex window open.
+- Five-hour and weekly limit cycles remain saved after resets and restarts. Limits shows observed quota consumption and locally recorded tokens for each cycle and limit bucket.
+- Server lifetime and daily token activity are cached separately. Repeated observations replace a day's reported total instead of adding it again. Incomplete server summaries are flagged and cannot replace a larger known local lifetime total.
+- Local chats show token breakdowns, cache rate, request details, and API-equivalent cost estimates when a matching price is available.
+- Low-quota desktop alerts fire at 75%, 50%, 25%, and 0% remaining. The dashboard and always-on-top widget show live quota and reset times.
+
+Five-hour and weekly token views overlap. Server account totals already include local activity, so these totals must not be added together. Exact remote token usage per limit period, deleted logs, and quota observations missed while Meter is closed cannot be reconstructed. Ordinary Chat conversations and separately billed API activity are not collected.
+
+Local accounting uses original request timestamps and half-open intervals `[start, reset)`. Durable checkpoints resume after restart, incomplete log lines are retried, and copied fork requests are counted once. Requests without shared-limit attribution are retained separately and excluded from limit token totals. Quota percentages are never converted into invented token counts.
+
+## Pricing
+
+Meter fetches standard text-token pricing from [OpenAI's official pricing source](https://developers.openai.com/api/docs/pricing.md) every six hours, with retry after failures. Settings displays discovered model rates, their freshness, and a manual update button.
+
+Estimates include published cached-input, cache-write, and long-context rates where available. Missing model prices remain unavailable, and a failed refresh retains the last successful SQLite cache. These are API-equivalent estimates, not subscription charges.
+
+See the [official app-server account and rate-limit documentation](https://learn.chatgpt.com/docs/app-server) for the account data used by Meter.
+
+## OBS and Rainmeter
+
+Meter's local server listens on `127.0.0.1:32145`:
+
+| Address | Purpose |
+| --- | --- |
+| `/overlay` | Transparent OBS browser-source overlay |
+| `/api/usage` | Signed-in account identity and live quota JSON |
+| `/events` | Live updates through server-sent events |
+| `/health` | Startup health check |
+
+## Builds and verification
+
+The [Windows GitHub Actions workflow](https://github.com/greeeeggy/codex-usage-tracker/actions/workflows/windows-build.yml) performs all application compilation on GitHub's Windows runners.
+
+It checks frontend types, runs Rust regression tests for account isolation, migration, pricing, log replay, and limit windows, initializes the real Codex app-server without Command Prompt, tests the dashboard in Chromium, builds both Windows executables, and verifies startup. The downloadable artifact includes both executables and their build manifest.
+
+The app uses Tauri 2, Rust, SQLite, React, TypeScript, Tailwind CSS, and Zustand.
+
+## Version 0.3.0
+
+Automatic account detection and saved-account selection, separate account usage/history, recovery of identified local records, safe clearing on sign-out, and protection against delayed updates from a previous account. Includes the native Windows launch fix for error 740.

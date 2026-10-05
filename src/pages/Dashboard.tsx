@@ -30,6 +30,8 @@ export function Dashboard() {
   const detectedClients = useUsageStore((s) => s.detectedClients);
   const activePage = useUsageStore((s) => s.activePage);
   const setActivePage = useUsageStore((s) => s.setActivePage);
+  const accountKey = useUsageStore(s => s.viewAccountKey);
+  const savedAccount = useUsageStore(s => s.selectedAccountKey !== null && s.selectedAccountKey !== s.activeAccount?.accountKey);
 
   useEffect(() => {
     init();
@@ -56,7 +58,7 @@ export function Dashboard() {
   const lifetime = lifetimeCoverage(accountUsage, tokenTotals, snapshot);
 
   // Error / auth required state
-  if ((monitorState === 'error' || monitorState === 'authRequired') && !['limits', 'history', 'settings'].includes(activePage)) {
+  if (!savedAccount && (monitorState === 'error' || monitorState === 'authRequired') && !['limits', 'history', 'settings'].includes(activePage)) {
     return (
       <div className="h-full p-6">
         <DashboardHeader />
@@ -465,7 +467,10 @@ export function Dashboard() {
   return (
     <div className="p-6 space-y-4" style={{ animation: 'fade-in 300ms ease-out' }}>
       <DashboardHeader />
-      {renderActiveView()}
+      {savedAccount && <p className="text-sm" style={{ color: 'var(--text-muted)' }}>
+        Showing saved usage for this account. Sign into it in Codex to update its quotas.
+      </p>}
+      <div key={accountKey}>{renderActiveView()}</div>
     </div>
   );
 }

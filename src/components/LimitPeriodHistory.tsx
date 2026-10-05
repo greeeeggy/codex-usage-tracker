@@ -9,6 +9,7 @@ const count = (n: number) => n.toLocaleString();
 
 export function LimitPeriodHistory() {
   const snapshot = useUsageStore(s => s.snapshot);
+  const accountKey = useUsageStore(s => s.viewAccountKey);
   const [page, setPage] = useState<LimitHistoryPage>({ periods: [], total: 0 });
   const [kind, setKind] = useState('');
   const [bucket, setBucket] = useState('');
@@ -33,13 +34,13 @@ export function LimitPeriodHistory() {
     let disposed = false;
     const timer = window.setTimeout(() => {
       setLoading(true);
-      void invoke<LimitHistoryPage>('get_limit_history', { limitId: bucket || null, windowKind: kind || null, offset })
+      void invoke<LimitHistoryPage>('get_limit_history', { accountKey, limitId: bucket || null, windowKind: kind || null, offset })
         .then(data => { if (!disposed) { setPage(data); setError(null); } })
         .catch(e => { if (!disposed) setError(String(e)); })
         .finally(() => { if (!disposed) setLoading(false); });
     }, 150);
     return () => { disposed = true; window.clearTimeout(timer); };
-  }, [bucket, kind, offset, revision]);
+  }, [accountKey, bucket, kind, offset, revision]);
 
   const ids = [...new Set([...(snapshot?.limits ?? []).map(b => b.limitId), ...page.periods.map(p => p.limitId)])];
   return (

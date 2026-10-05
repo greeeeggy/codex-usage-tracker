@@ -2,23 +2,19 @@ import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, Event } from '@tauri-apps/api/event';
 import {
-  AccountUsage,
-  AppEvent,
-  ChatSessionSummary,
-  MonitorState,
-  MonitorStateResponse,
-  QuotaSampleRow,
-  TokenTotals,
-  UsageDeltas,
-  UsageSnapshot,
-  UsageWindow,
-  PricingCatalog,
+  AccountContext, AccountProfile, AccountUsage, AppEvent, ChatSessionSummary,
+  MonitorState, MonitorStateResponse, QuotaSampleRow, TokenTotals,
+  UsageDeltas, UsageSnapshot, UsageWindow, PricingCatalog,
 } from '../types/usage';
 
 let isInitialized = false;
 let initInFlight: Promise<void> | null = null;
-
+let viewRevision = 0;
 export type AppPage = 'overview' | 'usage' | 'history' | 'limits' | 'sessions' | 'insights' | 'settings';
+const emptyView = {
+  snapshot: null, accountUsage: null, currentChat: null, tokenTotals: null,
+  quotaHistory: [], usageDeltas: null, recentEvents: [], lastRefreshError: null,
+};
 
 interface UsageState {
   snapshot: UsageSnapshot | null;
@@ -29,6 +25,10 @@ interface UsageState {
   quotaHistory: QuotaSampleRow[];
   usageDeltas: UsageDeltas | null;
   recentEvents: AppEvent[];
+  activeAccount: AccountProfile | null;
+  accounts: AccountProfile[];
+  selectedAccountKey: string | null;
+  viewAccountKey: string;
   monitorState: MonitorState;
   errorMessage: string | null;
   detectedClients: { clientType: string; name: string }[];
@@ -36,180 +36,124 @@ interface UsageState {
   isRefreshing: boolean;
   lastRefreshError: string | null;
   activePage: AppPage;
-
-  // Derived getters
   getFiveHourWindow: () => UsageWindow | undefined;
   getWeeklyWindow: () => UsageWindow | undefined;
-
-  // Actions
   init: () => Promise<void>;
   refresh: () => Promise<void>;
+  selectAccount: (key: string | null) => void;
   toggleTheme: () => void;
   setActivePage: (page: AppPage) => void;
 }
 
-export const useUsageStore = create<UsageState>((set, get) => ({
-  snapshot: null,
-  accountUsage: null,
-  currentChat: null,
-  pricing: null,
-  tokenTotals: null,
-  quotaHistory: [],
-  usageDeltas: null,
-  recentEvents: [],
-  monitorState: 'dormant',
-  errorMessage: null,
-  detectedClients: [],
-  isDarkTheme: true,
-  isRefreshing: false,
-  lastRefreshError: null,
-  activePage: 'overview',
-
-  getFiveHourWindow: () => {
-    const { snapshot } = get();
-    return snapshot?.windows.find((w) => w.name === 'fiveHour' || w.durationMinutes === 300);
-  },
-
-  getWeeklyWindow: () => {
-    const { snapshot } = get();
-    return snapshot?.windows.find((w) => w.name === 'weekly' || w.durationMinutes === 10080);
-  },
-
-  init: async () => {
-    if (initInFlight) return initInFlight;
-
-    initInFlight = (async () => {
-      try {
-        // Always rehydrate current state. The dashboard webview starts hidden and
-        // can mount before the monitor has received its first snapshot.
-        const stateResponse = await invoke<MonitorStateResponse>('get_monitor_state');
-        set({
-          monitorState: stateResponse.state,
-          errorMessage: stateResponse.errorMessage,
-          detectedClients: stateResponse.detectedClients,
-        });
-
-        const snapshot = await invoke<UsageSnapshot | null>('get_usage');
-        if (snapshot) {
-          set({ snapshot });
-        }
-
-        const accountUsage = await invoke<AccountUsage | null>('get_account_usage').catch(() => null);
-        if (accountUsage) {
-          set({ accountUsage });
-        }
-
-        const tokenTotals = await invoke<TokenTotals | null>('get_token_totals').catch(() => null);
-        if (tokenTotals) {
-          set({ tokenTotals });
-        }
-
-        const loadCurrentChat = async () => {
-          const currentChat = await invoke<ChatSessionSummary | null>('get_current_chat_summary')
-            .catch(() => null);
-          if (currentChat) {
-            set({ currentChat });
-          }
-        };
-        await loadCurrentChat();
-        const pricing = await invoke<PricingCatalog>('get_pricing').catch(() => null);
-        set({ pricing });
-
-        const loadExtras = async () => {
-          try {
-            const quotaHistory = await invoke<QuotaSampleRow[]>('get_quota_history', { windowKind: 'weekly', sinceHours: 168 });
-            const recentEvents = await invoke<AppEvent[]>('get_recent_events');
-            const usageDeltas = await invoke<UsageDeltas>('get_usage_deltas');
-            set({ quotaHistory, recentEvents, usageDeltas });
-          } catch (e) {
-            console.error('Failed to load extra data:', e);
-          }
-        };
-        await loadExtras();
-
-        if (isInitialized) return;
-
-        // Register listeners only once per webview.
-        await listen('pricing-updated', (event: Event<PricingCatalog>) => {
-          set({ pricing: event.payload });
-          void loadCurrentChat();
-        });
-        await listen('usage-updated', (event: Event<UsageSnapshot>) => {
-          console.log('Usage updated:', event.payload);
-          set({ snapshot: event.payload });
-          void invoke<MonitorStateResponse>('get_monitor_state').then(res => set({ monitorState: res.state, errorMessage: res.errorMessage }));
-          loadExtras(); // Refresh derived metrics on usage update
-        });
-
-        await listen('token-totals-updated', (event: Event<TokenTotals>) => {
-          console.log('Token totals updated:', event.payload);
-          set({ tokenTotals: event.payload });
-          void loadCurrentChat();
-        });
-
-        await listen('account-usage-updated', (event: Event<AccountUsage>) => {
-          console.log('Account usage updated:', event.payload);
-          set({ accountUsage: event.payload });
-        });
-
-        await listen('state-changed', (event: Event<MonitorState>) => {
-          console.log('State changed:', event.payload);
-          // Also fetch the full state response to get error messages if any
-          invoke<MonitorStateResponse>('get_monitor_state').then((res) => {
-            set({
-              monitorState: res.state,
-              errorMessage: res.errorMessage,
-              detectedClients: res.detectedClients,
-            });
-          });
-        });
-      } catch (err) {
-        console.error('Failed to initialize store:', err);
-        throw err;
-      }
-    })();
-
-    try {
-      await initInFlight;
-      isInitialized = true;
-    } catch {
-      // The error was logged above. A later call may retry initialization.
-    } finally {
-      initInFlight = null;
-    }
-  },
-
-  refresh: async () => {
-    const { isRefreshing } = get();
-    if (isRefreshing) return; // Prevent duplicate refreshes
-
-    set({ isRefreshing: true, lastRefreshError: null });
-    try {
-      await invoke('refresh_usage');
-      // Give a brief delay so the UI shows the spinner
-      await new Promise((r) => setTimeout(r, 500));
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('Failed to refresh:', msg);
-      set({ lastRefreshError: msg });
-    } finally {
-      set({ isRefreshing: false });
-    }
-  },
-
-  toggleTheme: () => {
-    set((state) => {
-      const newDark = !state.isDarkTheme;
-      if (newDark) {
-        document.documentElement.classList.add('dark');
-      } else {
-        document.documentElement.classList.remove('dark');
-      }
-      return { isDarkTheme: newDark };
+export const useUsageStore = create<UsageState>((set, get) => {
+  const loadView = async () => {
+    const revision = ++viewRevision;
+    const key = get().viewAccountKey;
+    const args = { accountKey: key };
+    const [snapshot, accountUsage, tokenTotals, currentChat, quotaHistory, recentEvents, usageDeltas] = await Promise.all([
+      invoke<UsageSnapshot | null>('get_usage', args).catch(() => null),
+      invoke<AccountUsage | null>('get_account_usage', args).catch(() => null),
+      invoke<TokenTotals | null>('get_token_totals', args).catch(() => null),
+      invoke<ChatSessionSummary | null>('get_current_chat_summary', args).catch(() => null),
+      invoke<QuotaSampleRow[]>('get_quota_history', { ...args, windowKind: 'weekly', sinceHours: 168 }).catch(() => []),
+      invoke<AppEvent[]>('get_recent_events', args).catch(() => []),
+      invoke<UsageDeltas | null>('get_usage_deltas', args).catch(() => null),
+    ]);
+    if (revision !== viewRevision || key !== get().viewAccountKey) return;
+    set({
+      snapshot: snapshot?.accountKey === key ? snapshot : null,
+      accountUsage: accountUsage?.accountKey === key ? accountUsage : null,
+      tokenTotals: tokenTotals?.accountKey === key ? tokenTotals : null,
+      currentChat: currentChat?.accountKey === key ? currentChat : null,
+      quotaHistory, recentEvents, usageDeltas,
     });
-  },
+  };
+  const loadCurrentChat = async () => {
+    const key = get().viewAccountKey;
+    const revision = viewRevision;
+    const currentChat = await invoke<ChatSessionSummary | null>('get_current_chat_summary', { accountKey: key }).catch(() => null);
+    if (key === get().viewAccountKey && revision === viewRevision) {
+      set({ currentChat: currentChat?.accountKey === key ? currentChat : null });
+    }
+  };
+  const switchView = () => {
+    const key = get().selectedAccountKey ?? get().activeAccount?.accountKey ?? '__signed_out__';
+    if (key !== get().viewAccountKey) {
+      ++viewRevision;
+      set({ ...emptyView, viewAccountKey: key });
+    }
+    void loadView();
+  };
+  const updateAccounts = (context: AccountContext) => {
+    const before = get().viewAccountKey;
+    const key = get().selectedAccountKey ?? context.activeAccount?.accountKey ?? '__signed_out__';
+    set({ activeAccount: context.activeAccount, accounts: context.accounts });
+    if (before !== key) switchView();
+  };
+  const loadMonitor = async () => {
+    const response = await invoke<MonitorStateResponse>('get_monitor_state');
+    set({ monitorState: response.state, errorMessage: response.errorMessage, detectedClients: response.detectedClients });
+  };
 
-  setActivePage: (page: AppPage) => {
-    set({ activePage: page });
-  },
-}));
+  return {
+    ...emptyView, pricing: null, activeAccount: null, accounts: [],
+    selectedAccountKey: null, viewAccountKey: '__signed_out__',
+    monitorState: 'dormant', errorMessage: null, detectedClients: [],
+    isDarkTheme: true, isRefreshing: false, activePage: 'overview',
+    getFiveHourWindow: () => get().snapshot?.windows.find(w => w.name === 'fiveHour' || w.durationMinutes === 300),
+    getWeeklyWindow: () => get().snapshot?.windows.find(w => w.name === 'weekly' || w.durationMinutes === 10080),
+    selectAccount: key => { set({ selectedAccountKey: key }); switchView(); },
+    init: async () => {
+      if (initInFlight) return initInFlight;
+      initInFlight = (async () => {
+        if (!isInitialized) {
+          // Listen before hydration so a sign-in change during startup is observed.
+          await listen('accounts-updated', (event: Event<AccountContext>) => updateAccounts(event.payload));
+          await listen('pricing-updated', (event: Event<PricingCatalog>) => { set({ pricing: event.payload }); void loadCurrentChat(); });
+          await listen('usage-updated', (event: Event<UsageSnapshot>) => {
+            if (event.payload.accountKey !== get().viewAccountKey) return;
+            set({ snapshot: event.payload });
+            void loadView();
+            void loadMonitor().catch(console.error);
+          });
+          await listen('token-totals-updated', (event: Event<TokenTotals>) => {
+            if (event.payload.accountKey !== get().viewAccountKey) return;
+            set({ tokenTotals: event.payload });
+            void loadCurrentChat();
+          });
+          await listen('account-usage-updated', (event: Event<AccountUsage>) => {
+            if (event.payload.accountKey === get().viewAccountKey) set({ accountUsage: event.payload });
+          });
+          await listen('state-changed', () => { void loadMonitor().catch(console.error); });
+          isInitialized = true;
+        }
+        const [context, pricing] = await Promise.all([
+          invoke<AccountContext>('get_accounts'),
+          invoke<PricingCatalog>('get_pricing').catch(() => null),
+          loadMonitor(),
+        ]);
+        updateAccounts(context);
+        set({ pricing });
+        await loadView();
+      })();
+      try { await initInFlight; }
+      catch (error) { console.error('Failed to initialize store:', error); }
+      finally { initInFlight = null; }
+    },
+    refresh: async () => {
+      if (get().isRefreshing || get().selectedAccountKey !== null && get().selectedAccountKey !== get().activeAccount?.accountKey) return;
+      set({ isRefreshing: true, lastRefreshError: null });
+      try {
+        await invoke('refresh_usage');
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } catch (error) { set({ lastRefreshError: String(error) }); }
+      finally { set({ isRefreshing: false }); }
+    },
+    toggleTheme: () => {
+      const isDarkTheme = !get().isDarkTheme;
+      document.documentElement.classList.toggle('dark', isDarkTheme);
+      set({ isDarkTheme });
+    },
+    setActivePage: activePage => set({ activePage }),
+  };
+});

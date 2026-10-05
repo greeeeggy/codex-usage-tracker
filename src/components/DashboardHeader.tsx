@@ -1,6 +1,7 @@
 import { useUsageStore } from '../stores/usageStore';
 import { RefreshCw, Settings2 } from 'lucide-react';
 import { format } from 'date-fns';
+import { AccountSelector } from './AccountSelector';
 
 export function DashboardHeader() {
   const snapshot = useUsageStore((s) => s.snapshot);
@@ -8,6 +9,7 @@ export function DashboardHeader() {
   const errorMessage = useUsageStore((s) => s.errorMessage);
   const refresh = useUsageStore((s) => s.refresh);
   const isRefreshing = useUsageStore((s) => s.isRefreshing);
+  const saved = useUsageStore(s => s.selectedAccountKey !== null && s.selectedAccountKey !== s.activeAccount?.accountKey);
 
   const planType = snapshot?.planType;
 
@@ -36,11 +38,12 @@ export function DashboardHeader() {
       statusLabel = 'Error';
       break;
   }
+  if (saved) { statusColor = 'var(--text-muted)'; statusLabel = 'Saved history'; showPulse = false; }
 
   return (
-    <header className="flex items-center justify-between mb-6">
+    <header className="flex flex-wrap gap-3 items-center justify-between mb-6">
       {/* Left side */}
-      <div className="flex items-center gap-4">
+      <div className="flex flex-wrap items-center gap-4">
         <h1 className="text-[26px] font-semibold tracking-tight" style={{ color: 'var(--text-primary)' }}>
           Codex Meter
         </h1>
@@ -83,20 +86,21 @@ export function DashboardHeader() {
 
       {/* Right side */}
       <div className="flex items-center gap-3">
+        <AccountSelector />
         {snapshot && (
           <div className="text-right mr-2">
             <span className="text-[11px] block" style={{ color: 'var(--text-muted)' }}>
-              Last refreshed
+              {saved ? 'Last observed' : 'Last refreshed'}
             </span>
             <span className="text-sm font-medium tabular-nums" style={{ color: 'var(--text-secondary)' }}>
-              {format(new Date(snapshot.capturedAt), 'h:mm:ss a')}
+              {format(new Date(snapshot.capturedAt), saved ? 'MMM d, h:mm a' : 'h:mm:ss a')}
             </span>
           </div>
         )}
 
         <button
           onClick={refresh}
-          disabled={isRefreshing || monitorState === 'error' || monitorState === 'authRequired'}
+          disabled={saved || isRefreshing || monitorState === 'error' || monitorState === 'authRequired'}
           className="p-2 rounded-lg transition-all duration-150 flex items-center justify-center"
           style={{
             color: isRefreshing ? 'var(--purple)' : 'var(--text-muted)',

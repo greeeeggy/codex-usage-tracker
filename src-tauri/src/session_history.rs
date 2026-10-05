@@ -98,6 +98,7 @@ pub struct ChatRequestUsage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatSessionSummary {
+    pub account_key: String,
     pub id: String,
     pub title: String,
     pub cwd: Option<String>,
@@ -282,6 +283,7 @@ fn parse_usage_info(payload: &Value) -> Option<(DetailedTokenUsage, DetailedToke
 
 #[derive(Default)]
 struct SummaryHead {
+    account_key: Option<String>,
     id: Option<String>,
     title: Option<String>,
     cwd: Option<String>,
@@ -313,6 +315,8 @@ fn read_summary_head(path: &Path) -> Result<SummaryHead, String> {
         if line_prefix.contains("\"type\":\"session_meta\"") {
             if let Ok(row) = serde_json::from_str::<Value>(&line) {
                 let payload = &row["payload"];
+                result.account_key =
+                    crate::accounts::from_session_metadata(payload).map(|a| a.account_key);
                 result.id = payload
                     .get("session_id")
                     .or_else(|| payload.get("id"))
@@ -554,6 +558,9 @@ fn summarize_file(path: &Path) -> Result<ChatSessionSummary, String> {
     };
 
     Ok(ChatSessionSummary {
+        account_key: head
+            .account_key
+            .unwrap_or_else(|| crate::accounts::LEGACY_ACCOUNT.into()),
         id,
         title,
         cwd: head.cwd,
@@ -681,6 +688,15 @@ pub fn current_chat_summary() -> Result<Option<ChatSessionSummary>, String> {
     let mut summary = summarize_file_cached(&path)?;
     summary.is_current = true;
     Ok(Some(summary))
+}
+
+pub fn list_chat_sessions_for(account_key: &str) -> Result<Vec<ChatSessionSummary>, String> {
+    let mut rows = list_chat_sessions()?;
+    rows.retain(|row| row.account_key == account_key);
+    for (index, row) in rows.iter_mut().enumerate() {
+        row.is_current = index == 0;
+    }
+    Ok(rows)
 }
 
 fn valid_session_id(id: &str) -> bool {

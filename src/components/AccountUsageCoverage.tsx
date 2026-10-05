@@ -8,16 +8,17 @@ export function AccountUsageCoverage() {
   const account = useUsageStore(s => s.accountUsage);
   const snapshot = useUsageStore(s => s.snapshot);
   const tokens = useUsageStore(s => s.tokenTotals);
+  const accountKey = useUsageStore(s => s.viewAccountKey);
   const [page, setPage] = useState<AccountDayPage>({ days: [], total: 0 });
   const [offset, setOffset] = useState(0);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let disposed = false;
-    void invoke<AccountDayPage>('get_account_usage_days', { offset })
+    void invoke<AccountDayPage>('get_account_usage_days', { accountKey, offset })
       .then(data => { if (!disposed && data) { setPage(data); setError(null); } })
       .catch(e => { if (!disposed) setError(String(e)); });
     return () => { disposed = true; };
-  }, [account, offset]);
+  }, [accountKey, account, offset]);
   const fetched = account?.fetchedAt;
   const { incomplete } = lifetimeCoverage(account, tokens, snapshot);
   return (

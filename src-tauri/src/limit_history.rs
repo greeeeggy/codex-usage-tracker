@@ -124,12 +124,18 @@ pub struct AccountDayPage {
 }
 
 pub fn persist_snapshot(db: &crate::db::Db, snapshot: &crate::codex_client::UsageSnapshot) {
+    let account_key = snapshot
+        .account_key
+        .as_deref()
+        .unwrap_or(crate::accounts::LEGACY_ACCOUNT);
+    let _ = db.cache_snapshot(snapshot);
     let captured = chrono::DateTime::parse_from_rfc3339(&snapshot.captured_at)
         .map(|t| t.timestamp())
         .unwrap_or_else(|_| chrono::Utc::now().timestamp());
     if snapshot.limits.is_empty() {
         persist_windows(
             db,
+            account_key,
             snapshot.limit_id.as_deref().unwrap_or("codex"),
             snapshot.limit_name.as_deref(),
             &snapshot.windows,
@@ -139,6 +145,7 @@ pub fn persist_snapshot(db: &crate::db::Db, snapshot: &crate::codex_client::Usag
         for bucket in &snapshot.limits {
             persist_windows(
                 db,
+                account_key,
                 &bucket.limit_id,
                 bucket.limit_name.as_deref(),
                 &bucket.windows,
@@ -150,6 +157,7 @@ pub fn persist_snapshot(db: &crate::db::Db, snapshot: &crate::codex_client::Usag
 
 fn persist_windows(
     db: &crate::db::Db,
+    account_key: &str,
     id: &str,
     name: Option<&str>,
     windows: &[crate::codex_client::UsageWindow],
@@ -161,7 +169,8 @@ fn persist_windows(
             .as_deref()
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
         if let (Some(reset), Some(duration)) = (reset, window.duration_minutes) {
-            if let Err(error) = db.record_limit_period(
+            if let Err(error) = db.record_limit_period_for(
+                account_key,
                 id,
                 name,
                 &window.name,

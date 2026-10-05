@@ -17,12 +17,15 @@ pub enum CodexEvent {
     TokenUsageUpdated(crate::db::TokenEvent),
     // Error(String),
     Disconnected,
+    AccountChanged,
 }
 
 /// Normalized usage snapshot
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageSnapshot {
+    #[serde(default)]
+    pub account_key: Option<String>,
     pub captured_at: String,
     pub limit_id: Option<String>,
     pub limit_name: Option<String>,
@@ -61,6 +64,8 @@ pub struct UsageWindow {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountUsage {
+    #[serde(default)]
+    pub account_key: Option<String>,
     pub summary: Option<AccountUsageSummary>,
     pub daily_usage_buckets: Option<Vec<DailyUsageBucket>>,
     #[serde(default)]
@@ -144,6 +149,7 @@ type PendingMap = Arc<Mutex<HashMap<u64, PendingRequest>>>;
 pub struct CodexClient {
     event_tx: mpsc::UnboundedSender<CodexEvent>,
     command_tx: Option<mpsc::UnboundedSender<ClientCommand>>,
+    account: Arc<Mutex<Option<crate::accounts::AccountProfile>>>,
 }
 
 enum ClientCommand {
@@ -165,11 +171,13 @@ impl CodexClient {
         Self {
             event_tx,
             command_tx: None,
+            account: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Start the Codex app-server process and begin communication
     pub async fn start(&mut self) -> Result<(), String> {
+        let starting_identity = crate::accounts::local_account()?.map(|a| a.account_key);
         let codex_path = find_codex_executable()?;
         log::info!("[CODEX] Found executable: {}", codex_path.display());
 
@@ -220,6 +228,7 @@ impl CodexClient {
         // Stdout reader thread - reads JSON lines and dispatches
         let pending_reader = pending.clone();
         let event_tx_reader = self.event_tx.clone();
+        let account_reader = self.account.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
@@ -254,15 +263,25 @@ impl CodexClient {
 
                             // Push notification
                             if let Some(method) = &msg.method {
+                                if method == "account/updated" {
+                                    if account_reader.lock().unwrap().take().is_some() {
+                                        let _ = event_tx_reader.send(CodexEvent::AccountChanged);
+                                    }
+                                }
                                 if method == "account/rateLimits/updated" {
                                     if let Some(params) = msg.params {
                                         if let Some(snapshot) = params.get("rateLimits") {
-                                            if let Ok(normalized) = parse_rate_limits(
+                                            if let Ok(mut normalized) = parse_rate_limits(
                                                 &serde_json::json!({
                                                     "rateLimits": snapshot,
                                                     "rateLimitsByLimitId": params.get("rateLimitsByLimitId")
                                                 }),
                                             ) {
+                                                normalized.account_key = account_reader
+                                                    .lock()
+                                                    .unwrap()
+                                                    .as_ref()
+                                                    .map(|a| a.account_key.clone());
                                                 let _ = event_tx_reader
                                                     .send(CodexEvent::UsageUpdated(normalized));
                                             }
@@ -300,7 +319,14 @@ impl CodexClient {
 
                                         let event = crate::db::TokenEvent {
                                             id: uuid::Uuid::new_v4().to_string(),
-                                            account_key: "default".to_string(),
+                                            account_key: account_reader
+                                                .lock()
+                                                .unwrap()
+                                                .as_ref()
+                                                .map(|a| a.account_key.clone())
+                                                .unwrap_or_else(|| {
+                                                    crate::accounts::LEGACY_ACCOUNT.into()
+                                                }),
                                             captured_at: chrono::Utc::now().timestamp(),
                                             client_type: "unknown".to_string(),
                                             thread_id: params
@@ -410,6 +436,10 @@ impl CodexClient {
 
         // Send initialized notification
         self.notify("initialized", None);
+        self.read_account().await?;
+        if starting_identity != crate::accounts::local_account()?.map(|a| a.account_key) {
+            return Err("Codex account changed while connecting; reconnecting".into());
+        }
 
         Ok(())
     }
@@ -452,15 +482,65 @@ impl CodexClient {
 
     /// Fetch current rate limits
     pub async fn read_rate_limits(&self) -> Result<UsageSnapshot, String> {
+        let account = self
+            .account()
+            .ok_or("Please sign in to Codex to read account usage")?;
+        self.check_identity(&account)?;
         let result = self.request("account/rateLimits/read", None).await?;
-        parse_rate_limits(&result)
+        self.check_identity(&account)?;
+        let mut snapshot = parse_rate_limits(&result)?;
+        snapshot.account_key = Some(account.account_key);
+        Ok(snapshot)
+    }
+
+    pub fn account(&self) -> Option<crate::accounts::AccountProfile> {
+        self.account.lock().unwrap().clone()
+    }
+
+    pub(crate) fn has_current_identity(&self) -> bool {
+        self.account()
+            .is_some_and(|a| self.check_identity(&a).is_ok())
+    }
+
+    fn check_identity(&self, account: &crate::accounts::AccountProfile) -> Result<(), String> {
+        if self.account().as_ref().map(|a| &a.account_key) != Some(&account.account_key) {
+            return Err("Codex account changed; reconnecting".into());
+        }
+        if !account.account_key.starts_with("chatgpt-email:")
+            && crate::accounts::local_account()?
+                .as_ref()
+                .map(|a| &a.account_key)
+                != Some(&account.account_key)
+        {
+            return Err("Codex account changed; reconnecting".into());
+        }
+        Ok(())
+    }
+
+    pub async fn read_account(&self) -> Result<Option<crate::accounts::AccountProfile>, String> {
+        let result = self
+            .request(
+                "account/read",
+                Some(serde_json::json!({"refreshToken":false})),
+            )
+            .await?;
+        let profile = crate::accounts::from_response(&result, crate::accounts::local_account()?)?;
+        *self.account.lock().unwrap() = profile.clone();
+        Ok(profile)
     }
 
     /// Fetch authoritative account-level token activity from Codex.
     pub async fn read_account_usage(&self) -> Result<AccountUsage, String> {
+        let account = self
+            .account()
+            .ok_or("Please sign in to Codex to read account usage")?;
+        self.check_identity(&account)?;
         let result = self.request("account/usage/read", None).await?;
-        serde_json::from_value(result)
-            .map_err(|e| format!("Failed to parse account token usage: {}", e))
+        self.check_identity(&account)?;
+        let mut usage: AccountUsage = serde_json::from_value(result)
+            .map_err(|e| format!("Failed to parse account token usage: {}", e))?;
+        usage.account_key = Some(account.account_key);
+        Ok(usage)
     }
 
     /// Stop the client
@@ -584,6 +664,7 @@ fn normalize_snapshot(raw: &RawSnapshot) -> UsageSnapshot {
     }
 
     UsageSnapshot {
+        account_key: None,
         captured_at: chrono::Utc::now().to_rfc3339(),
         limit_id: raw.limit_id.clone(),
         limit_name: raw.limit_name.clone(),

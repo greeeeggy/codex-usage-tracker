@@ -37,6 +37,8 @@ pub struct TokenBreakdown {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenTotals {
+    #[serde(default)]
+    pub account_key: Option<String>,
     pub current_session: TokenBreakdown,
     pub five_hour_window: TokenBreakdown,
     pub weekly_window: TokenBreakdown,
@@ -83,6 +85,7 @@ pub struct AppEvent {
 
 pub struct Db {
     conn: Arc<Mutex<Connection>>,
+    active_account: Mutex<String>,
 }
 
 impl Db {
@@ -93,6 +96,7 @@ impl Db {
             .unwrap_or_else(|| Connection::open_in_memory().unwrap());
         let db = Self {
             conn: Arc::new(Mutex::new(conn)),
+            active_account: Mutex::new(crate::accounts::LEGACY_ACCOUNT.into()),
         };
         db.initialize_schema().unwrap();
         db
@@ -116,6 +120,7 @@ impl Db {
 
         let db = Self {
             conn: Arc::new(Mutex::new(conn)),
+            active_account: Mutex::new(crate::accounts::LEGACY_ACCOUNT.into()),
         };
 
         db.initialize_schema()?;
@@ -283,6 +288,124 @@ impl Db {
                 .map_err(|e| e.to_string())?;
             tx.commit().map_err(|e| e.to_string())?;
         }
+        let has_column = |table: &str, column: &str| -> Result<bool, String> {
+            let mut stmt = conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .map_err(|e| e.to_string())?;
+            let names = stmt
+                .query_map([], |r| r.get::<_, String>(1))
+                .map_err(|e| e.to_string())?;
+            Ok(names.filter_map(Result::ok).any(|name| name == column))
+        };
+        let migrate_days = !has_column("account_usage_days", "account_key")?;
+        let migrate_events = !has_column("app_events", "account_key")?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        if migrate_days {
+            tx.execute_batch("ALTER TABLE account_usage_days RENAME TO account_usage_days_legacy;
+                CREATE TABLE account_usage_days (account_key TEXT NOT NULL, start_date TEXT NOT NULL, tokens INTEGER NOT NULL, observed_at INTEGER NOT NULL, PRIMARY KEY(account_key, start_date));
+                INSERT INTO account_usage_days SELECT 'default',start_date,tokens,observed_at FROM account_usage_days_legacy;
+                DROP TABLE account_usage_days_legacy;").map_err(|e| e.to_string())?;
+        }
+        if migrate_events {
+            tx.execute_batch(
+                "ALTER TABLE app_events ADD COLUMN account_key TEXT NOT NULL DEFAULT 'default';",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.execute("INSERT OR IGNORE INTO settings SELECT 'account_usage_cache:default',value_json,updated_at FROM settings WHERE key = 'account_usage_cache'", []).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn set_active_account(&self, key: &str) {
+        *self.active_account.lock().unwrap() = key.into();
+    }
+
+    pub fn remember_account(
+        &self,
+        profile: &crate::accounts::AccountProfile,
+    ) -> Result<(), String> {
+        let key = format!("account_profile:{}", profile.account_key);
+        let existing = self
+            .get_setting(&key)?
+            .and_then(|json| serde_json::from_str::<crate::accounts::AccountProfile>(&json).ok());
+        let mut profile = profile.clone();
+        if let Some(existing) = existing {
+            if profile.email.is_none() {
+                profile.email = existing.email;
+                profile.label = existing.label;
+            }
+            if profile.plan_type.is_none() {
+                profile.plan_type = existing.plan_type;
+            }
+        }
+        self.set_setting(
+            &key,
+            &serde_json::to_string(&profile).map_err(|e| e.to_string())?,
+        )?;
+        let now = chrono::Utc::now().timestamp();
+        self.conn.lock().unwrap().execute("INSERT INTO accounts VALUES (?1,?2,?3,?3) ON CONFLICT(account_key) DO UPDATE SET plan_type=COALESCE(excluded.plan_type,plan_type),last_seen_at=excluded.last_seen_at", params![profile.account_key,profile.plan_type,now]).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn list_accounts(&self) -> Result<Vec<crate::accounts::AccountProfile>, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT value_json FROM settings WHERE key LIKE 'account_profile:%'")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut profiles: Vec<_> = rows
+            .filter_map(Result::ok)
+            .filter_map(|s| serde_json::from_str::<crate::accounts::AccountProfile>(&s).ok())
+            .collect();
+        profiles.sort_by(|a, b| {
+            a.label
+                .cmp(&b.label)
+                .then(a.account_key.cmp(&b.account_key))
+        });
+        profiles.push(crate::accounts::AccountProfile::legacy());
+        Ok(profiles)
+    }
+
+    pub fn cache_snapshot(
+        &self,
+        snapshot: &crate::codex_client::UsageSnapshot,
+    ) -> Result<(), String> {
+        let Some(key) = &snapshot.account_key else {
+            return Ok(());
+        };
+        let captured = chrono::DateTime::parse_from_rfc3339(&snapshot.captured_at)
+            .map(|t| t.timestamp())
+            .map_err(|e| e.to_string())?;
+        self.conn.lock().unwrap().execute("INSERT INTO settings VALUES (?1,?2,?3) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at WHERE excluded.updated_at>=settings.updated_at", params![format!("quota_cache:{key}"),serde_json::to_string(snapshot).map_err(|e| e.to_string())?,captured]).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn cached_snapshot(
+        &self,
+        account_key: &str,
+    ) -> Result<Option<crate::codex_client::UsageSnapshot>, String> {
+        Ok(self
+            .get_setting(&format!("quota_cache:{account_key}"))?
+            .and_then(|s| serde_json::from_str(&s).ok()))
+    }
+
+    pub fn cached_account_usage(
+        &self,
+        account_key: &str,
+    ) -> Result<Option<crate::codex_client::AccountUsage>, String> {
+        Ok(self
+            .get_setting(&format!("account_usage_cache:{account_key}"))?
+            .and_then(|s| serde_json::from_str(&s).ok()))
+    }
+
+    pub fn assign_rollout_account(&self, file_key: &str, account_key: &str) -> Result<(), String> {
+        if account_key == crate::accounts::LEGACY_ACCOUNT {
+            return Ok(());
+        }
+        self.conn.lock().unwrap().execute("UPDATE window_token_events SET account_key=?1 WHERE thread_id=?2 AND account_key='default'",params![account_key,file_key]).map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -317,6 +440,10 @@ impl Db {
         let json = serde_json::to_string(usage).map_err(|e| e.to_string())?;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let account_key = usage
+            .account_key
+            .as_deref()
+            .unwrap_or(crate::accounts::LEGACY_ACCOUNT);
         for day in usage.daily_usage_buckets.as_deref().unwrap_or(&[]) {
             if day.tokens < 0
                 || chrono::NaiveDate::parse_from_str(&day.start_date, "%Y-%m-%d").is_err()
@@ -325,29 +452,42 @@ impl Db {
             }
             // Server buckets are totals, not increments. Repeated polls replace
             // the observation; they must never add local usage a second time.
-            tx.execute("INSERT INTO account_usage_days VALUES (?1, ?2, ?3)
-                ON CONFLICT(start_date) DO UPDATE SET tokens = excluded.tokens, observed_at = excluded.observed_at
-                WHERE excluded.observed_at >= observed_at", params![day.start_date, day.tokens, captured])
+            tx.execute("INSERT INTO account_usage_days VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(account_key,start_date) DO UPDATE SET tokens = excluded.tokens, observed_at = excluded.observed_at
+                WHERE excluded.observed_at >= observed_at", params![account_key, day.start_date, day.tokens, captured])
                 .map_err(|e| e.to_string())?;
         }
-        tx.execute("INSERT INTO settings VALUES ('account_usage_cache', ?1, ?2)
+        tx.execute("INSERT INTO settings VALUES (?1, ?2, ?3)
             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at
-            WHERE excluded.updated_at >= updated_at", params![json, captured]).map_err(|e| e.to_string())?;
+            WHERE excluded.updated_at >= updated_at", params![format!("account_usage_cache:{account_key}"),json, captured]).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())
     }
 
+    #[cfg(test)]
     pub fn get_account_usage_days(
         &self,
         offset: i64,
     ) -> Result<crate::limit_history::AccountDayPage, String> {
+        self.get_account_usage_days_for("default", offset)
+    }
+
+    pub fn get_account_usage_days_for(
+        &self,
+        account_key: &str,
+        offset: i64,
+    ) -> Result<crate::limit_history::AccountDayPage, String> {
         let conn = self.conn.lock().unwrap();
         let total = conn
-            .query_row("SELECT COUNT(*) FROM account_usage_days", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM account_usage_days WHERE account_key=?1",
+                [account_key],
+                |r| r.get(0),
+            )
             .map_err(|e| e.to_string())?;
-        let mut stmt = conn.prepare("SELECT start_date, tokens, observed_at FROM account_usage_days ORDER BY start_date DESC LIMIT 100 OFFSET ?1")
+        let mut stmt = conn.prepare("SELECT start_date, tokens, observed_at FROM account_usage_days WHERE account_key=?1 ORDER BY start_date DESC LIMIT 100 OFFSET ?2")
             .map_err(|e| e.to_string())?;
         let days = stmt
-            .query_map([offset.max(0)], |r| {
+            .query_map(params![account_key, offset.max(0)], |r| {
                 Ok(crate::limit_history::AccountDay {
                     start_date: r.get(0)?,
                     tokens: r.get(1)?,
@@ -360,8 +500,25 @@ impl Db {
         Ok(crate::limit_history::AccountDayPage { days, total })
     }
 
+    #[cfg(test)]
     pub fn record_limit_period(
         &self,
+        limit_id: &str,
+        limit_name: Option<&str>,
+        kind: &str,
+        minutes: u64,
+        reset: i64,
+        captured: i64,
+        used: f64,
+    ) -> Result<(), String> {
+        self.record_limit_period_for(
+            "default", limit_id, limit_name, kind, minutes, reset, captured, used,
+        )
+    }
+
+    pub fn record_limit_period_for(
+        &self,
+        account_key: &str,
         limit_id: &str,
         limit_name: Option<&str>,
         kind: &str,
@@ -377,11 +534,11 @@ impl Db {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         let changed = tx.execute("INSERT INTO limit_observations
             (account_key, limit_id, limit_name, window_kind, duration_seconds, resets_at, captured_at, used_percent)
-            VALUES ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            VALUES (?8, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
             ON CONFLICT(account_key, limit_id, window_kind, captured_at, resets_at) DO UPDATE SET
                 limit_name = COALESCE(excluded.limit_name, limit_name), used_percent = excluded.used_percent
             WHERE used_percent <> excluded.used_percent OR (excluded.limit_name IS NOT NULL AND limit_name IS NOT excluded.limit_name)",
-            params![limit_id, limit_name, kind, minutes as i64 * 60, reset, captured, used.clamp(0.0, 100.0)])
+            params![limit_id, limit_name, kind, minutes as i64 * 60, reset, captured, used.clamp(0.0, 100.0),account_key])
             .map_err(|e| e.to_string())?;
         if changed > 0 {
             tx.execute(
@@ -466,8 +623,20 @@ impl Db {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn get_limit_history(
         &self,
+        limit_id: Option<&str>,
+        kind: Option<&str>,
+        offset: i64,
+        now: i64,
+    ) -> Result<crate::limit_history::LimitHistoryPage, String> {
+        self.get_limit_history_for("default", limit_id, kind, offset, now)
+    }
+
+    pub fn get_limit_history_for(
+        &self,
+        account_key: &str,
         limit_id: Option<&str>,
         kind: Option<&str>,
         offset: i64,
@@ -478,8 +647,8 @@ impl Db {
         let total = conn
             .query_row(
                 "SELECT COUNT(*) FROM limit_period_history WHERE
-            (?1 IS NULL OR limit_id = ?1) AND (?2 IS NULL OR window_kind = ?2)",
-                params![limit_id, kind],
+            (?1 IS NULL OR limit_id = ?1) AND (?2 IS NULL OR window_kind = ?2) AND account_key=?3",
+                params![limit_id, kind, account_key],
                 |r| r.get(0),
             )
             .map_err(|e| e.to_string())?;
@@ -487,12 +656,12 @@ impl Db {
             .prepare(
                 "SELECT id, limit_id, limit_name, window_kind, started_at, resets_at,
             first_observed_at, last_observed_at, used_percent FROM limit_period_history WHERE
-            (?1 IS NULL OR limit_id = ?1) AND (?2 IS NULL OR window_kind = ?2)
+            (?1 IS NULL OR limit_id = ?1) AND (?2 IS NULL OR window_kind = ?2) AND account_key=?4
             ORDER BY resets_at DESC, limit_id, window_kind LIMIT 100 OFFSET ?3",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map(params![limit_id, kind, offset.max(0)], |r| {
+            .query_map(params![limit_id, kind, offset.max(0), account_key], |r| {
                 let start: i64 = r.get(4)?;
                 let reset: i64 = r.get(5)?;
                 Ok(crate::limit_history::LimitPeriod {
@@ -516,8 +685,8 @@ impl Db {
         for period in &mut periods {
             period.tokens = conn.query_row("SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(cached_input_tokens),0),
                 COALESCE(SUM(output_tokens),0), COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(total_tokens),0)
-                FROM window_token_events WHERE account_key = 'default' AND limit_id = ?1 AND captured_at >= ?2 AND captured_at < ?3",
-                params![period.limit_id, period.started_at, period.resets_at], |r| {
+                FROM window_token_events WHERE account_key = ?4 AND limit_id = ?1 AND captured_at >= ?2 AND captured_at < ?3",
+                params![period.limit_id, period.started_at, period.resets_at,account_key], |r| {
                     let input: i64 = r.get(0)?;
                     let cached: i64 = r.get(1)?;
                     Ok(TokenBreakdown { input_tokens: input, cached_input_tokens: cached, uncached_input_tokens: (input - cached).max(0),
@@ -554,11 +723,12 @@ impl Db {
             tx.execute(
                 "INSERT INTO window_token_events VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                 ON CONFLICT(id) DO UPDATE SET
+                    account_key = CASE WHEN window_token_events.account_key='default' THEN excluded.account_key ELSE window_token_events.account_key END,
                     limit_id = excluded.limit_id, thread_id = excluded.thread_id,
-                    captured_at = excluded.captured_at, input_tokens = excluded.input_tokens,
+                    captured_at = MIN(excluded.captured_at,window_token_events.captured_at), input_tokens = excluded.input_tokens,
                     cached_input_tokens = excluded.cached_input_tokens, output_tokens = excluded.output_tokens,
                     reasoning_tokens = excluded.reasoning_tokens, total_tokens = excluded.total_tokens
-                WHERE excluded.captured_at < window_token_events.captured_at",
+                WHERE excluded.captured_at < window_token_events.captured_at OR (window_token_events.account_key='default' AND excluded.account_key<>'default')",
                 params![
                     event.id,
                     event.account_key,
@@ -619,6 +789,7 @@ impl Db {
     /// Used to populate charts. Returns at most `limit` samples.
     pub fn get_recent_quota_samples(
         &self,
+        account_key: &str,
         window_kind: &str,
         since_ts: i64,
         limit: i64,
@@ -630,7 +801,7 @@ impl Db {
              FROM (
                  SELECT captured_at, window_kind, used_percent, remaining_percent
                  FROM quota_samples
-                 WHERE window_kind = ?1 AND captured_at >= ?2
+                 WHERE window_kind = ?1 AND captured_at >= ?2 AND account_key=?4
                  ORDER BY captured_at DESC
                  LIMIT ?3
              )
@@ -639,7 +810,7 @@ impl Db {
             .map_err(|e| format!("Prepare failed: {}", e))?;
 
         let rows = stmt
-            .query_map(params![window_kind, since_ts, limit], |row| {
+            .query_map(params![window_kind, since_ts, limit, account_key], |row| {
                 Ok(QuotaSampleRow {
                     captured_at: row.get(0)?,
                     window_kind: row.get(1)?,
@@ -659,6 +830,7 @@ impl Db {
     /// Compute usage deltas from quota samples for a given window kind.
     pub fn get_usage_deltas(
         &self,
+        account_key: &str,
         window_kind: &str,
         session_start_ts: i64,
     ) -> Result<UsageDeltas, String> {
@@ -670,27 +842,28 @@ impl Db {
         let one_hour_ago = chrono::Utc::now().timestamp() - 3600;
 
         // Session delta: difference between first and latest sample since session start
-        let session_delta = Self::calc_delta(&conn, window_kind, session_start_ts)?;
+        let session_delta = Self::calc_delta(&conn, account_key, window_kind, session_start_ts)?;
 
         // Today delta: difference between first and latest sample since midnight
-        let today_delta = Self::calc_delta(&conn, window_kind, today_start_ts)?;
+        let today_delta = Self::calc_delta(&conn, account_key, window_kind, today_start_ts)?;
 
         // Peak hour: max used_percent in the last hour
         let peak_hour_used: f64 = conn.query_row(
-            "SELECT COALESCE(MAX(used_percent), 0.0) FROM quota_samples WHERE window_kind = ?1 AND captured_at >= ?2",
-            params![window_kind, one_hour_ago],
+            "SELECT COALESCE(MAX(used_percent), 0.0) FROM quota_samples WHERE window_kind = ?1 AND captured_at >= ?2 AND account_key=?3",
+            params![window_kind, one_hour_ago,account_key],
             |row| row.get(0),
         ).unwrap_or(0.0);
 
         // Sessions today: count distinct monitoring sessions by counting app_events of type session_started
         let sessions_today: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM app_events WHERE event_type = 'session_started' AND captured_at >= ?1",
-            params![today_start_ts],
+            "SELECT COUNT(*) FROM app_events WHERE event_type = 'session_started' AND captured_at >= ?1 AND account_key=?2",
+            params![today_start_ts,account_key],
             |row| row.get(0),
         ).unwrap_or(0);
 
         // Longest session: find the longest gap between session_started and session_ended today
-        let longest_session_minutes = Self::calc_longest_session(&conn, today_start_ts)?;
+        let longest_session_minutes =
+            Self::calc_longest_session(&conn, account_key, today_start_ts)?;
 
         Ok(UsageDeltas {
             session_delta,
@@ -701,16 +874,21 @@ impl Db {
         })
     }
 
-    fn calc_delta(conn: &Connection, window_kind: &str, since_ts: i64) -> Result<f64, String> {
+    fn calc_delta(
+        conn: &Connection,
+        account_key: &str,
+        window_kind: &str,
+        since_ts: i64,
+    ) -> Result<f64, String> {
         let first: Option<f64> = conn.query_row(
-            "SELECT used_percent FROM quota_samples WHERE window_kind = ?1 AND captured_at >= ?2 ORDER BY captured_at ASC LIMIT 1",
-            params![window_kind, since_ts],
+            "SELECT used_percent FROM quota_samples WHERE window_kind = ?1 AND captured_at >= ?2 AND account_key=?3 ORDER BY captured_at ASC LIMIT 1",
+            params![window_kind, since_ts,account_key],
             |row| row.get(0),
         ).ok();
 
         let latest: Option<f64> = conn.query_row(
-            "SELECT used_percent FROM quota_samples WHERE window_kind = ?1 AND captured_at >= ?2 ORDER BY captured_at DESC LIMIT 1",
-            params![window_kind, since_ts],
+            "SELECT used_percent FROM quota_samples WHERE window_kind = ?1 AND captured_at >= ?2 AND account_key=?3 ORDER BY captured_at DESC LIMIT 1",
+            params![window_kind, since_ts,account_key],
             |row| row.get(0),
         ).ok();
 
@@ -720,18 +898,22 @@ impl Db {
         }
     }
 
-    fn calc_longest_session(conn: &Connection, since_ts: i64) -> Result<i64, String> {
+    fn calc_longest_session(
+        conn: &Connection,
+        account_key: &str,
+        since_ts: i64,
+    ) -> Result<i64, String> {
         // Get all session start/end events today, ordered by time
         let mut stmt = conn
             .prepare(
                 "SELECT event_type, captured_at FROM app_events
-             WHERE event_type IN ('session_started', 'session_ended') AND captured_at >= ?1
+             WHERE event_type IN ('session_started', 'session_ended') AND captured_at >= ?1 AND account_key=?2
              ORDER BY captured_at ASC",
             )
             .map_err(|e| format!("Prepare failed: {}", e))?;
 
         let events: Vec<(String, i64)> = stmt
-            .query_map(params![since_ts], |row| {
+            .query_map(params![since_ts, account_key], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })
             .map_err(|e| format!("Query failed: {}", e))?
@@ -778,26 +960,30 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let now = chrono::Utc::now().timestamp();
         conn.execute(
-            "INSERT INTO app_events (event_type, label, captured_at, description) VALUES (?1, ?2, ?3, ?4)",
-            params![event_type, label, now, description],
+            "INSERT INTO app_events (event_type, label, captured_at, description,account_key) VALUES (?1, ?2, ?3, ?4,?5)",
+            params![event_type, label, now, description,self.active_account.lock().unwrap().clone()],
         ).map_err(|e| format!("Failed to insert app event: {}", e))?;
         Ok(())
     }
 
     /// Get recent app events, newest first. Returns at most `limit` events.
-    pub fn get_recent_events(&self, limit: i64) -> Result<Vec<AppEvent>, String> {
+    pub fn get_recent_events(
+        &self,
+        account_key: &str,
+        limit: i64,
+    ) -> Result<Vec<AppEvent>, String> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
                 "SELECT event_type, label, captured_at, description
-             FROM app_events
+             FROM app_events WHERE account_key=?2
              ORDER BY captured_at DESC
              LIMIT ?1",
             )
             .map_err(|e| format!("Prepare failed: {}", e))?;
 
         let rows = stmt
-            .query_map(params![limit], |row| {
+            .query_map(params![limit, account_key], |row| {
                 let ts: i64 = row.get(2)?;
                 let dt = chrono::DateTime::from_timestamp(ts, 0)
                     .map(|dt| dt.with_timezone(&Local).format("%H:%M:%S").to_string())
@@ -998,6 +1184,7 @@ impl Db {
         let all_time_recorded = Self::calculate_breakdown(&conn, account_key, 0, i64::MAX)?;
 
         Ok(TokenTotals {
+            account_key: Some(account_key.into()),
             current_session,
             five_hour_window,
             weekly_window,
@@ -1543,6 +1730,7 @@ mod limit_tests {
     fn server_day_totals_replace_observations_and_survive_missing_buckets() {
         let db = Db::test_db(None);
         let usage = |captured, tokens| crate::codex_client::AccountUsage {
+            account_key: None,
             summary: None,
             fetched_at: Some(captured),
             daily_usage_buckets: Some(vec![crate::codex_client::DailyUsageBucket {
@@ -1572,5 +1760,151 @@ mod limit_tests {
                 .total_tokens,
             0
         );
+    }
+
+    #[test]
+    fn separate_accounts_keep_tokens_periods_days_charts_and_events_after_restart() {
+        let path =
+            std::env::temp_dir().join(format!("meter-accounts-{}.sqlite", uuid::Uuid::new_v4()));
+        let now = chrono::Utc::now().timestamp();
+        let a = crate::accounts::identity("workspace-a", "user");
+        let b = crate::accounts::identity("workspace-b", "user");
+        {
+            let db = Db::test_db(Some(&path));
+            for (profile, tokens, percent) in [(&a, 100, 10.0), (&b, 900, 80.0)] {
+                db.remember_account(profile).unwrap();
+                let mut request = event(&profile.account_key, now - 10, tokens);
+                request.account_key = profile.account_key.clone();
+                db.save_rollout_batch(&profile.account_key, 1, "{}", &[(request, "codex".into())])
+                    .unwrap();
+                db.record_limit_period_for(
+                    &profile.account_key,
+                    "codex",
+                    None,
+                    "fiveHour",
+                    300,
+                    now + 60,
+                    now,
+                    percent,
+                )
+                .unwrap();
+                db.record_account_usage(&crate::codex_client::AccountUsage {
+                    account_key: Some(profile.account_key.clone()),
+                    fetched_at: Some(now),
+                    summary: None,
+                    daily_usage_buckets: Some(vec![crate::codex_client::DailyUsageBucket {
+                        start_date: "2026-10-05".into(),
+                        tokens,
+                    }]),
+                })
+                .unwrap();
+                db.insert_quota_sample(
+                    &profile.account_key,
+                    now,
+                    "weekly",
+                    Some(10080),
+                    percent,
+                    100.0 - percent,
+                    Some(now + 60),
+                    "primary",
+                )
+                .unwrap();
+                db.set_active_account(&profile.account_key);
+                db.insert_app_event("session_started", &profile.account_key, None)
+                    .unwrap();
+            }
+        }
+        {
+            let db = Db::test_db(Some(&path));
+            for (profile, tokens, percent) in [(&a, 100, 10.0), (&b, 900, 80.0)] {
+                assert_eq!(
+                    db.get_token_totals(&profile.account_key, 0, 0, i64::MAX, 0, i64::MAX)
+                        .unwrap()
+                        .all_time_recorded
+                        .total_tokens,
+                    tokens
+                );
+                let periods = db
+                    .get_limit_history_for(&profile.account_key, None, None, 0, now)
+                    .unwrap();
+                assert_eq!(periods.total, 1);
+                assert_eq!(periods.periods[0].tokens.total_tokens, tokens);
+                assert_eq!(periods.periods[0].used_percent, percent);
+                assert_eq!(
+                    db.get_account_usage_days_for(&profile.account_key, 0)
+                        .unwrap()
+                        .days[0]
+                        .tokens,
+                    tokens
+                );
+                assert_eq!(
+                    db.cached_account_usage(&profile.account_key)
+                        .unwrap()
+                        .unwrap()
+                        .account_key,
+                    Some(profile.account_key.clone())
+                );
+                assert_eq!(
+                    db.get_recent_quota_samples(&profile.account_key, "weekly", 0, 20)
+                        .unwrap()[0]
+                        .used_percent,
+                    percent
+                );
+                assert_eq!(
+                    db.get_usage_deltas(&profile.account_key, "weekly", 0)
+                        .unwrap()
+                        .peak_hour_used,
+                    percent
+                );
+                assert_eq!(
+                    db.get_recent_events(&profile.account_key, 20).unwrap()[0].label,
+                    profile.account_key
+                );
+            }
+            assert_eq!(
+                db.get_limit_history_for("default", None, None, 0, now)
+                    .unwrap()
+                    .total,
+                0
+            );
+            assert_eq!(db.list_accounts().unwrap().len(), 3);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn migrates_old_combined_days_cache_and_events_to_unassigned_history() {
+        let path =
+            std::env::temp_dir().join(format!("meter-legacy-{}.sqlite", uuid::Uuid::new_v4()));
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE account_usage_days(start_date TEXT PRIMARY KEY,tokens INTEGER NOT NULL,observed_at INTEGER NOT NULL);
+                INSERT INTO account_usage_days VALUES('2026-10-02',123,99);
+                CREATE TABLE app_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_type TEXT NOT NULL,label TEXT NOT NULL,captured_at INTEGER NOT NULL,description TEXT);
+                INSERT INTO app_events VALUES(7,'session_started','Old session',99,NULL);
+                CREATE TABLE settings(key TEXT PRIMARY KEY,value_json TEXT NOT NULL,updated_at INTEGER NOT NULL);
+                INSERT INTO settings VALUES('account_usage_cache','{\"summary\":null,\"dailyUsageBuckets\":null,\"fetchedAt\":99}',99);").unwrap();
+        }
+        for _ in 0..2 {
+            let db = Db::test_db(Some(&path));
+            assert_eq!(
+                db.get_account_usage_days_for("default", 0).unwrap().days[0].tokens,
+                123
+            );
+            assert_eq!(
+                db.get_account_usage_days_for("new-account", 0)
+                    .unwrap()
+                    .total,
+                0
+            );
+            assert_eq!(
+                db.get_recent_events("default", 20).unwrap()[0].label,
+                "Old session"
+            );
+            assert!(db.get_recent_events("new-account", 20).unwrap().is_empty());
+            assert!(db.cached_account_usage("default").unwrap().is_some());
+            assert!(db.cached_account_usage("new-account").unwrap().is_none());
+        }
+        std::fs::remove_file(path).unwrap();
     }
 }

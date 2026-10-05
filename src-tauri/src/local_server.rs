@@ -60,6 +60,7 @@ async fn api_usage(State(state): State<ServerState>) -> impl IntoResponse {
 
     if let Some(snapshot) = &usage.snapshot {
         let mut response = serde_json::Map::new();
+        response.insert("account".into(), serde_json::json!(usage.active_account));
 
         for window in &snapshot.windows {
             let window_data = serde_json::json!({

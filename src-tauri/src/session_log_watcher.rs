@@ -13,6 +13,8 @@ use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Checkpoint {
+    #[serde(default)]
+    account_key: Option<String>,
     previous: Option<DetailedTokenUsage>,
     model: Option<String>,
     #[serde(default)]
@@ -20,6 +22,7 @@ struct Checkpoint {
 }
 
 struct LiveContext {
+    account_key: String,
     timestamp: i64,
     context_window: Option<i64>,
     last: TokenBreakdown,
@@ -83,12 +86,43 @@ fn import_batch(db: &Db, path: &Path) -> Result<Option<LiveContext>, String> {
         .unwrap_or_default();
     let file = File::open(path).map_err(|e| e.to_string())?;
     let len = file.metadata().map_err(|e| e.to_string())?.len();
+    if checkpoint.account_key.is_none() {
+        let mut header = String::new();
+        BufReader::new(File::open(path).map_err(|e| e.to_string())?)
+            .read_line(&mut header)
+            .map_err(|e| e.to_string())?;
+        let profile = serde_json::from_str::<Value>(&header)
+            .ok()
+            .filter(|row| row["type"] == "session_meta")
+            .and_then(|row| crate::accounts::from_session_metadata(&row["payload"]));
+        if let Some(profile) = profile {
+            db.remember_account(&profile)?;
+            db.assign_rollout_account(key, &profile.account_key)?;
+            checkpoint = Checkpoint {
+                account_key: Some(profile.account_key),
+                ..Default::default()
+            };
+            // Rebuild identified observations once, preserving global request IDs.
+            offset = 0;
+        } else {
+            checkpoint.account_key = Some(crate::accounts::LEGACY_ACCOUNT.into());
+            db.save_rollout_batch(
+                key,
+                offset,
+                &serde_json::to_string(&checkpoint).map_err(|e| e.to_string())?,
+                &[],
+            )?;
+        }
+    }
     if offset == len {
         return Ok(None);
     }
     if offset > len {
         offset = 0;
-        checkpoint = Checkpoint::default();
+        checkpoint = Checkpoint {
+            account_key: checkpoint.account_key.clone(),
+            ..Default::default()
+        };
     }
     let mut reader = BufReader::new(file);
     reader
@@ -136,7 +170,7 @@ fn import_batch(db: &Db, path: &Path) -> Result<Option<LiveContext>, String> {
             continue;
         };
         let captured = time.timestamp();
-        let rate_snapshot =
+        let mut rate_snapshot =
             crate::codex_client::snapshot_from_rollout(&payload["rate_limits"], timestamp).filter(
                 |s| {
                     s.windows
@@ -144,7 +178,8 @@ fn import_batch(db: &Db, path: &Path) -> Result<Option<LiveContext>, String> {
                         .any(|w| w.duration_minutes.is_some_and(|m| m > 0))
                 },
             );
-        if let Some(snapshot) = &rate_snapshot {
+        if let Some(snapshot) = &mut rate_snapshot {
+            snapshot.account_key = checkpoint.account_key.clone();
             crate::limit_history::persist_snapshot(db, snapshot);
         }
         let Some(total) = payload
@@ -186,7 +221,10 @@ fn import_batch(db: &Db, path: &Path) -> Result<Option<LiveContext>, String> {
                             )
                         },
                     ),
-                    account_key: "default".into(),
+                    account_key: checkpoint
+                        .account_key
+                        .clone()
+                        .unwrap_or_else(|| crate::accounts::LEGACY_ACCOUNT.into()),
                     captured_at: captured,
                     client_type: "local_session".into(),
                     thread_id: Some(key.into()),
@@ -205,6 +243,10 @@ fn import_batch(db: &Db, path: &Path) -> Result<Option<LiveContext>, String> {
         }
         checkpoint.previous = Some(total);
         latest = Some(LiveContext {
+            account_key: checkpoint
+                .account_key
+                .clone()
+                .unwrap_or_else(|| crate::accounts::LEGACY_ACCOUNT.into()),
             timestamp: captured,
             context_window: payload
                 .pointer("/info/model_context_window")
@@ -232,7 +274,7 @@ pub async fn run(db: Arc<Db>, app: tauri::AppHandle, state: Arc<RwLock<UsageStat
     let Some(dir) = crate::session_history::sessions_dir() else {
         return;
     };
-    let mut latest_time = 0;
+    let mut latest_times = std::collections::HashMap::new();
     loop {
         let mut paths = Vec::new();
         files(&dir, &mut paths);
@@ -247,11 +289,18 @@ pub async fn run(db: Arc<Db>, app: tauri::AppHandle, state: Arc<RwLock<UsageStat
             match result {
                 Ok(Ok(Some(context))) => {
                     changed = true;
-                    if context.timestamp >= latest_time {
-                        latest_time = context.timestamp;
+                    let latest_time = latest_times.entry(context.account_key.clone()).or_insert(0);
+                    if context.timestamp >= *latest_time {
+                        *latest_time = context.timestamp;
                         let mut s = state.write().await;
+                        if s.active_account.as_ref().map(|a| &a.account_key)
+                            != Some(&context.account_key)
+                        {
+                            continue;
+                        }
                         if s.snapshot.is_none() {
                             s.snapshot = Some(crate::codex_client::UsageSnapshot {
+                                account_key: Some(context.account_key),
                                 captured_at: chrono::Utc::now().to_rfc3339(),
                                 limit_id: None,
                                 limit_name: None,
@@ -287,6 +336,11 @@ pub async fn run(db: Arc<Db>, app: tauri::AppHandle, state: Arc<RwLock<UsageStat
                 log::warn!("Token refresh failed: {error}");
             }
             let _ = app.emit("limit-history-updated", ());
+            let context = crate::accounts::AccountContext {
+                active_account: state.read().await.active_account.clone(),
+                accounts: db.list_accounts().unwrap_or_default(),
+            };
+            let _ = app.emit("accounts-updated", &context);
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
@@ -333,6 +387,86 @@ mod replay_tests {
             "rate_limits": {"limit_id": "codex", "primary": {"window_minutes": 300, "used_percent": 10,
             "resets_at": 1800000000}, "secondary": {"window_minutes": 10080, "used_percent": 20,
             "resets_at": 1800000000}}}}).to_string()
+    }
+
+    #[test]
+    fn identified_old_checkpoint_recovers_ownership_once_without_losing_unknown_history() {
+        let path = std::env::temp_dir().join(format!("rollout-{}.jsonl", uuid::Uuid::new_v4()));
+        let key = path.file_stem().unwrap().to_str().unwrap();
+        let header = serde_json::json!({"type":"session_meta","payload":{"creator_account_id":"workspace-a","creator_user_id":"user-a"}}).to_string();
+        let content = format!("{header}\n{}\n", row("2027-01-15T07:59:00Z", 100, 100));
+        std::fs::write(&path, &content).unwrap();
+        let db = Db::test_db(None);
+        let old_event = TokenEvent {
+            id: format!("{key}:{}", header.len() + 1),
+            account_key: "default".into(),
+            captured_at: 1799999940,
+            client_type: "local_session".into(),
+            thread_id: Some(key.into()),
+            turn_id: None,
+            project_path_hash: None,
+            model: None,
+            input_tokens: 100,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: Some(0),
+            total_tokens: 100,
+            event_type: "local_rollout".into(),
+        };
+        db.save_rollout_batch(
+            key,
+            content.len() as u64,
+            "{}",
+            &[(old_event, "codex".into())],
+        )
+        .unwrap();
+        let profile = crate::accounts::identity("workspace-a", "user-a");
+        import_batch(&db, &path).unwrap();
+        import_batch(&db, &path).unwrap();
+        assert_eq!(
+            db.get_token_totals(&profile.account_key, 0, 0, i64::MAX, 0, i64::MAX)
+                .unwrap()
+                .all_time_recorded
+                .total_tokens,
+            100
+        );
+        assert_eq!(
+            db.get_token_totals("default", 0, 0, i64::MAX, 0, i64::MAX)
+                .unwrap()
+                .all_time_recorded
+                .total_tokens,
+            0
+        );
+        assert_eq!(
+            db.get_limit_history_for(&profile.account_key, None, None, 0, 1800000001)
+                .unwrap()
+                .total,
+            2
+        );
+        let unknown = std::env::temp_dir().join(format!("rollout-{}.jsonl", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &unknown,
+            format!("{}\n", row("2027-01-15T07:59:00Z", 50, 50)),
+        )
+        .unwrap();
+        import_batch(&db, &unknown).unwrap();
+        assert_eq!(
+            db.get_token_totals("default", 0, 0, i64::MAX, 0, i64::MAX)
+                .unwrap()
+                .all_time_recorded
+                .total_tokens,
+            50
+        );
+        assert_eq!(
+            db.get_token_totals(&profile.account_key, 0, 0, i64::MAX, 0, i64::MAX)
+                .unwrap()
+                .all_time_recorded
+                .total_tokens,
+            100
+        );
+        for file in [path, unknown] {
+            std::fs::remove_file(file).unwrap();
+        }
     }
 
     #[test]

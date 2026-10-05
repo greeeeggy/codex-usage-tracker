@@ -1,3 +1,4 @@
+mod accounts;
 mod codex_client;
 mod commands;
 mod db;
@@ -217,6 +218,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::get_accounts,
             commands::get_usage,
             commands::get_account_usage,
             commands::get_token_totals,
