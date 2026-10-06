@@ -33,9 +33,27 @@ The **Account** menu offers:
 - **A saved account**: shows that account's stored records and the time they were last observed. Sign into it in Codex to refresh its quotas.
 - **Earlier history (unassigned)**: retains older records whose owner cannot be established.
 
-Selecting an account in Meter does not log into it or change Codex credentials. Signing out clears the previous account's live display. The floating widget and local overlay always follow the signed-in account.
+Selecting an account in the header changes the history view. To change the actual Codex login, use **Switch** in the sidebar. Signing out clears the previous account's live display. The floating widget and local overlay always follow the signed-in account.
 
-Meter identifies users and account/workspaces by a hashed combination of their IDs. Plan or email changes do not split an ID-backed account. It reads only identity information from local credentials and saves the account key, display email, and plan; tokens and passwords are never stored in Meter's database or sent to its UI.
+Meter identifies users and account/workspaces by a hashed combination of their IDs. Plan or email changes do not split an ID-backed account. Usage records contain account identity, email, and plan; credentials never enter Meter's database, UI, or API. Optional saved logins are held separately under Meter's local app-data folder, encrypted with Windows DPAPI for the current Windows user.
+
+### Switch accounts
+
+1. Open **Switch**, give your current account a name, and choose **Save current account**.
+2. Give the second account a name and choose **Add another account**. Complete its official browser login once. This uses an isolated temporary Codex home and does not sign your current desktop out.
+3. Choose **Switch** beside the saved account. Meter pauses its own monitor, requests a normal desktop close, saves the outgoing login, atomically activates the chosen login, verifies account identity and quotas with Codex, and relaunches the desktop. A failed activation restores the outgoing login when the desktop can be closed safely.
+
+Finish active work before switching. A desktop that cannot close normally causes the switch to stop before replacing credentials. Existing CLI/editor sessions are not terminated or relaunched. Switching shares the configured `CODEX_HOME` and keeps its chats and workspaces. File-based ChatGPT credentials are required; keyring-only, ephemeral, and API-key sign-ins are not supported. Expired/revoked logins can be replaced through **Add another account**. Removing a saved login retains its usage history.
+
+### Usage Guard and AI connection
+
+Open **Usage Guard** and choose **Enable Usage Guard**. Meter registers its executable as a read-only stdio MCP server and merges its own `SessionStart`, `PreToolUse`, and `Stop` hooks into `CODEX_HOME/hooks.json`, preserving unrelated handlers and backing up the previous file. Restart Codex, then review/trust the hooks once through its hook settings (`/hooks` in the CLI). Use **Remove connection** to remove Meter's tool and hooks. For portable builds, keep the executable at the registered location; use **Update connection** if it moves.
+
+The AI can call `get_usage_guard`. At **5% or less** five-hour remaining, the returned prompt tells it to reach a safe stopping point, save an evidence-based handoff, schedule **one continuation of the same chat at reset + two minutes**, and end its turn. It must recheck usage before resuming, preserve previous instructions, avoid duplicate schedules, and state plainly when its client has no scheduling tool. An exhausted weekly allowance postpones the resume time to the later blocking reset.
+
+The API never treats missing, stale, unverified, or already-reset usage as fresh available quota. Hooks deliver one checkpoint per chat/turn/reset and avoid recursive Stop continuations. Hooks run at tool/turn boundaries and cannot interrupt an already-running command. Meter supplies the prompt; the host AI schedules continuation using its supported scheduling tool. Closing Meter makes the local connection unavailable. Local Codex/Work sessions support this path; hosted ChatGPT sessions need a separately reachable connector and do not automatically gain access to loopback services.
+
+This design follows [OpenAI authentication](https://learn.chatgpt.com/docs/auth), [MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli), and [hook contracts](https://learn.chatgpt.com/docs/hooks). Desktop discovery/normal-close behavior was checked against the open-source [Codex Swap Account](https://github.com/ZOONGG/codex-swap-account) and [Codex Account Switcher](https://github.com/liuzhao1225/codex-account-switcher); implementation here is original.
 
 Newer local session headers include ownership IDs, allowing Meter to recover the matching account's history. Older combined records stay unassigned rather than being guessed to belong to the current account. Keychain installations exposing only an email use a separate email-based identity; an email alone cannot establish workspace ownership.
 
@@ -67,6 +85,7 @@ Meter's local server listens on `127.0.0.1:32145`:
 | --- | --- |
 | `/overlay` | Transparent OBS browser-source overlay |
 | `/api/usage` | Signed-in account identity and live quota JSON |
+| `/api/guard` | Freshness, pause decision, exact resume time, and checkpoint prompt |
 | `/events` | Live updates through server-sent events |
 | `/health` | Startup health check |
 
@@ -78,7 +97,11 @@ It checks frontend types, runs Rust regression tests for account isolation, migr
 
 The app uses Tauri 2, Rust, SQLite, React, TypeScript, Tailwind CSS, and Zustand.
 
-## Version 0.3.1
+## Version 0.4.0
+
+Adds **Switch** with encrypted saved accounts, isolated first-time sign-in, normal Codex close/relaunch, verified activation and recovery. Adds **Usage Guard**, a local API, packaged MCP tool, and installable lifecycle hooks for the 5% handoff and reset-plus-two-minute continuation prompt. Windows builds remain on GitHub Actions, including bridge checks against the packaged executable.
+
+### Version 0.3.1
 
 Fixes duplicate window controls caused by restoring an old native title bar setting. The dashboard now has a neutral palette, smaller quota panels, flat token totals, working settings access, and a chart with an explicit height so observations remain visible. Account detection and separate usage/history remain available.
 

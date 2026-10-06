@@ -1,4 +1,6 @@
+mod account_switch;
 mod accounts;
+pub mod agent_bridge;
 mod codex_client;
 mod commands;
 mod db;
@@ -6,6 +8,7 @@ mod limit_history;
 mod local_server;
 mod pricing;
 mod process_detector;
+mod quota_guard;
 mod session_history;
 mod session_log_watcher;
 mod usage_service;
@@ -54,6 +57,7 @@ pub fn run() {
 
             // Store the shared state for Tauri commands
             app.manage(shared_state.clone());
+            app.manage(account_switch::SwitchManager::default());
             pricing::initialize(&db);
             db.backfill_limit_periods().map_err(std::io::Error::other)?;
             let pricing_db = db.clone();
@@ -204,6 +208,16 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            account_switch::get_switch_accounts,
+            account_switch::save_current_login,
+            account_switch::remove_saved_login,
+            account_switch::start_account_login,
+            account_switch::poll_account_login,
+            account_switch::cancel_account_login,
+            account_switch::switch_codex_account,
+            agent_bridge::get_usage_guard,
+            agent_bridge::get_guard_integration,
+            agent_bridge::configure_usage_guard,
             commands::get_accounts,
             commands::get_usage,
             commands::get_account_usage,

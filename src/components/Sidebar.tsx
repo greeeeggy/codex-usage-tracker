@@ -1,9 +1,11 @@
 import { useUsageStore, type AppPage } from '../stores/usageStore';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { LayoutDashboard, BarChart3, History, Gauge, MonitorDot, Lightbulb, Settings, ArrowUpRight } from 'lucide-react';
+import { LayoutDashboard, BarChart3, History, Gauge, MonitorDot, Lightbulb, Settings, ArrowUpRight, ArrowLeftRight, ShieldCheck } from 'lucide-react';
 
 const items = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'switch', label: 'Switch', icon: ArrowLeftRight },
+  { id: 'guard', label: 'Usage Guard', icon: ShieldCheck },
   { id: 'usage', label: 'Usage', icon: BarChart3 },
   { id: 'history', label: 'History', icon: History },
   { id: 'limits', label: 'Limits', icon: Gauge },

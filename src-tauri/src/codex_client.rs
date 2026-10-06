@@ -163,7 +163,7 @@ enum ClientCommand {
         method: String,
         params: Option<serde_json::Value>,
     },
-    Stop,
+    Stop(Option<oneshot::Sender<()>>),
 }
 
 impl CodexClient {
@@ -413,9 +413,18 @@ impl CodexClient {
                             let _ = writer.flush();
                         }
                     }
-                    ClientCommand::Stop => break,
+                    ClientCommand::Stop(ack) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        if let Some(ack) = ack {
+                            let _ = ack.send(());
+                        }
+                        break;
+                    }
                 }
             }
+            let _ = child.kill();
+            let _ = child.wait();
         });
 
         // Initialize the connection
@@ -546,8 +555,21 @@ impl CodexClient {
     /// Stop the client
     pub fn stop(&self) {
         if let Some(cmd_tx) = &self.command_tx {
-            let _ = cmd_tx.send(ClientCommand::Stop);
+            let _ = cmd_tx.send(ClientCommand::Stop(None));
         }
+    }
+
+    pub async fn stop_and_wait(&self) -> Result<(), String> {
+        if let Some(tx) = &self.command_tx {
+            let (ack, rx) = oneshot::channel();
+            tx.send(ClientCommand::Stop(Some(ack)))
+                .map_err(|_| "Monitor already stopped")?;
+            timeout(Duration::from_secs(10), rx)
+                .await
+                .map_err(|_| "Monitor did not stop in time")?
+                .map_err(|_| "Monitor stop failed")?;
+        }
+        Ok(())
     }
 }
 
@@ -600,7 +622,7 @@ fn codex_executable_candidates(appdata: Option<&OsStr>, path: Option<&OsStr>) ->
     candidates
 }
 
-fn find_codex_executable() -> Result<PathBuf, String> {
+pub(crate) fn find_codex_executable() -> Result<PathBuf, String> {
     let appdata = std::env::var_os("APPDATA");
     let path = std::env::var_os("PATH");
     let mut failures = Vec::new();

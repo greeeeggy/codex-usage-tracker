@@ -2,7 +2,7 @@ import { useUsageStore } from '../stores/usageStore';
 import { RefreshCw, Settings2 } from 'lucide-react';
 import { AccountSelector } from './AccountSelector';
 
-const pageTitles = { overview: 'Overview', usage: 'Usage', history: 'History', limits: 'Limits', sessions: 'Sessions', insights: 'Insights', settings: 'Settings' };
+const pageTitles = { overview: 'Overview', usage: 'Usage', history: 'History', limits: 'Limits', sessions: 'Sessions', insights: 'Insights', settings: 'Settings', switch: 'Switch accounts', guard: 'Usage Guard' };
 
 export function DashboardHeader() {
   const snapshot = useUsageStore(s => s.snapshot);

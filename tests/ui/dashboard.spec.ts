@@ -25,6 +25,9 @@ test.beforeEach(async ({ page }) => {
     let active: string | null = 'account-a';
     let maximized = false;
     const windowCommands: string[] = [];
+    let savedLogins = profiles.slice(0, 2).map((account, index) => ({ id: `saved-${index}`, label: index ? 'Work' : 'Personal', account, savedAt: new Date().toISOString() }));
+    let loginPending = false;
+    let guardInstalled = false;
     Object.assign(globalThis, {
       __meterEmit: emit,
       __meterSignIn: (key: string | null) => { active = key; emit('accounts-updated', { activeAccount: profiles.find(p => p.accountKey === key) ?? null, accounts: profiles }); emit('state-changed', key ? 'monitoring' : 'authRequired'); },
@@ -47,6 +50,24 @@ test.beforeEach(async ({ page }) => {
         const other = key === 'account-b';
         const localTokens = other ? { ...tokens, inputTokens: 4500, totalTokens: 5000 } : tokens;
         if (command === 'get_accounts') return { activeAccount: profiles.find(p => p.accountKey === active) ?? null, accounts: profiles };
+        if (command === 'get_switch_accounts') return { profiles: savedLogins, activeAccount: profiles.find(p => p.accountKey === active) ?? null, loginPending };
+        if (command === 'save_current_login') { const saved = savedLogins.find(p => p.account.accountKey === active)!; saved.label = args.label as string || saved.label; return saved; }
+        if (command === 'start_account_login') { loginPending = true; return null; }
+        if (command === 'poll_account_login') return null;
+        if (command === 'cancel_account_login') { loginPending = false; return null; }
+        if (command === 'remove_saved_login') { savedLogins = savedLogins.filter(p => p.id !== args.id); return null; }
+        if (command === 'switch_codex_account') {
+          if ((globalThis as unknown as { __meterSwitchFail?: boolean }).__meterSwitchFail) throw new Error('Codex did not close normally. Credentials were not changed.');
+          active = savedLogins.find(p => p.id === args.id)!.account.accountKey;
+          emit('accounts-updated', { activeAccount: profiles.find(p => p.accountKey === active), accounts: profiles });
+          return null;
+        }
+        if (command === 'get_guard_integration') return { installed: guardInstalled };
+        if (command === 'configure_usage_guard') { guardInstalled = args.enabled as boolean; return { installed: guardInstalled }; }
+        if (command === 'get_usage_guard') {
+          const low = (globalThis as unknown as { __meterLowQuota?: boolean }).__meterLowQuota;
+          return low ? { status: 'pause', shouldPause: true, remainingPercent: 5, resumeAt: '2026-10-06T11:02:00+00:00', prompt: 'Preserve a handoff and schedule this same chat at 2026-10-06T11:02:00+00:00.' } : { status: 'ready', shouldPause: false, remainingPercent: 80, prompt: null };
+        }
         if (command === 'get_monitor_state') return { state: active ? 'monitoring' : 'authRequired', errorMessage: active ? null : 'Sign into Codex', detectedClients: [] };
         if (command === 'get_usage') {
           if (key === (globalThis as unknown as { __meterDelayAccount: string | null }).__meterDelayAccount) await new Promise(resolve => globalThis.setTimeout(resolve, 1200));
@@ -75,6 +96,53 @@ test.beforeEach(async ({ page }) => {
       },
     } });
   });
+});
+
+test('Switch changes the live account and preserves separate quota history', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('navigation').getByRole('button', { name: 'Switch', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Switch accounts' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Switch to Personal' })).toBeDisabled();
+  await page.getByRole('button', { name: 'Switch to Work' }).click();
+  await expect(page.getByRole('status')).toContainText('Codex relaunched with Work');
+  await expect(page.getByRole('button', { name: 'Switch to Work' })).toBeDisabled();
+  await page.getByRole('navigation').getByRole('button', { name: 'Overview', exact: true }).click();
+  await expect(page.getByRole('progressbar', { name: '5-hour quota remaining' })).toHaveAttribute('aria-valuenow', '30');
+});
+
+test('Failed normal close shows an error and keeps the original account active', async ({ page }) => {
+  await page.addInitScript(() => Object.assign(globalThis, { __meterSwitchFail: true }));
+  await page.goto('/');
+  await page.getByRole('navigation').getByRole('button', { name: 'Switch', exact: true }).click();
+  await page.getByRole('button', { name: 'Switch to Work' }).click();
+  await expect(page.getByRole('alert')).toContainText('Credentials were not changed');
+  await expect(page.getByRole('button', { name: 'Switch to Personal' })).toBeDisabled();
+});
+
+test('New login can be cancelled without changing the active account', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('navigation').getByRole('button', { name: 'Switch', exact: true }).click();
+  await page.getByLabel('Account name').fill('Second account');
+  await page.getByRole('button', { name: 'Add another account' }).click();
+  await expect(page.getByText('Waiting for browser sign-in…')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Switch to Work' })).toBeDisabled();
+  await page.getByRole('button', { name: 'Cancel sign-in' }).click();
+  await expect(page.getByRole('button', { name: 'Switch to Work' })).toBeEnabled();
+});
+
+test('Usage Guard shows exact resume time and installs or removes the connection', async ({ page }) => {
+  await page.addInitScript(() => Object.assign(globalThis, { __meterLowQuota: true }));
+  await page.setViewportSize({ width: 900, height: 650 });
+  await page.goto('/');
+  await page.getByRole('navigation').getByRole('button', { name: 'Usage Guard', exact: true }).click();
+  await expect(page.getByText('5.0%', { exact: true })).toBeVisible();
+  await expect(page.getByText('Exact time: 2026-10-06T11:02:00+00:00')).toBeVisible();
+  await page.getByRole('button', { name: 'Enable Usage Guard' }).click();
+  await expect(page.getByRole('status')).toContainText('review/trust');
+  await page.getByRole('button', { name: 'Remove connection' }).click();
+  await expect(page.getByRole('button', { name: 'Enable Usage Guard' })).toBeVisible();
+  expect(await page.locator('main').evaluate(el => el.scrollWidth > el.clientWidth)).toBe(false);
+  await page.screenshot({ path: 'test-results/usage-guard.png', fullPage: true });
 });
 
 test('One title bar sends minimize, maximize, restore and close-to-tray actions', async ({ page }) => {

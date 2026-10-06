@@ -64,7 +64,7 @@ pub fn from_session_metadata(value: &Value) -> Option<AccountProfile> {
     ))
 }
 
-fn from_auth(value: &Value) -> Option<AccountProfile> {
+pub(crate) fn from_auth(value: &Value) -> Option<AccountProfile> {
     if text(value, "auth_mode").is_some_and(|mode| mode.eq_ignore_ascii_case("apikey")) {
         return None;
     }

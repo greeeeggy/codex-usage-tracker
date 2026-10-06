@@ -10,7 +10,7 @@ import {
 let isInitialized = false;
 let initInFlight: Promise<void> | null = null;
 let viewRevision = 0;
-export type AppPage = 'overview' | 'usage' | 'history' | 'limits' | 'sessions' | 'insights' | 'settings';
+export type AppPage = 'overview' | 'usage' | 'history' | 'limits' | 'sessions' | 'insights' | 'settings' | 'switch' | 'guard';
 const emptyView = {
   snapshot: null, accountUsage: null, currentChat: null, tokenTotals: null,
   quotaHistory: [], usageDeltas: null, recentEvents: [], lastRefreshError: null,

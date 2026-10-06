@@ -10,6 +10,8 @@ import { LimitPeriodHistory } from '../components/LimitPeriodHistory';
 import { AccountUsageCoverage } from '../components/AccountUsageCoverage';
 import { PricingCatalogCard } from '../components/PricingCatalogCard';
 import { ChatSessionHistory } from '../components/ChatSessionHistory';
+import { SwitchAccounts } from '../components/SwitchAccounts';
+import { UsageGuard } from '../components/UsageGuard';
 import { Activity, RefreshCw, Layers, History as HistoryIcon, Gauge, MonitorDot, Lightbulb, Settings as SettingsIcon, Cpu } from 'lucide-react';
 import { formatNumber, formatUsd } from '../utils/cn';
 import { lifetimeCoverage } from '../utils/usageCoverage';
@@ -101,6 +103,8 @@ export function Dashboard() {
   // View rendering based on active sidebar tab
   const renderActiveView = () => {
     switch (activePage) {
+      case 'switch': return <SwitchAccounts />;
+      case 'guard': return <UsageGuard />;
       case 'usage':
         return (
           <div className="space-y-6">

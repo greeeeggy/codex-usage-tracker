@@ -72,6 +72,8 @@ jobs:
           } finally {
             if (-not $process.HasExited) { Stop-Process -Id $process.Id }
           }
+      - name: Check packaged usage API and AI bridge
+        run: python tests/windows/check_agent_bridge.py release-download/Codex-Meter.exe
       - uses: actions/upload-artifact@v4
         with:
           name: Codex-Meter-Windows

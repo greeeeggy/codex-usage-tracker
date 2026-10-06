@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{Emitter, Listener};
 use tauri_plugin_notification::NotificationExt;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::time::{Duration, Instant};
 
 /// Monitor state machine states
@@ -50,10 +50,33 @@ pub struct UsageService {
     state: Arc<RwLock<UsageState>>,
     app_handle: tauri::AppHandle,
     db: Arc<crate::db::Db>,
+    control_rx: mpsc::UnboundedReceiver<MonitorControl>,
+}
+
+pub enum MonitorControl {
+    Pause(oneshot::Sender<Result<(), String>>),
+    Resume,
+}
+#[derive(Clone)]
+pub struct MonitorController(pub mpsc::UnboundedSender<MonitorControl>);
+impl MonitorController {
+    pub async fn pause(&self) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.0
+            .send(MonitorControl::Pause(tx))
+            .map_err(|_| "Monitor unavailable")?;
+        rx.await.map_err(|_| "Monitor unavailable")?
+    }
+    pub fn resume(&self) {
+        let _ = self.0.send(MonitorControl::Resume);
+    }
 }
 
 impl UsageService {
     pub fn new(app_handle: tauri::AppHandle) -> Self {
+        use tauri::Manager;
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        app_handle.manage(MonitorController(control_tx));
         let db = Arc::new(crate::db::Db::new(&app_handle).expect("Failed to init DB"));
         let now = chrono::Utc::now().timestamp();
         let initial_state = UsageState {
@@ -65,6 +88,7 @@ impl UsageService {
             state: Arc::new(RwLock::new(initial_state)),
             app_handle,
             db,
+            control_rx,
         }
     }
 
@@ -79,7 +103,7 @@ impl UsageService {
     }
 
     /// Start the monitoring loop
-    pub async fn run(self) {
+    pub async fn run(mut self) {
         let state = self.state.clone();
         let app_handle = self.app_handle.clone();
         let db_clone = self.db.clone();
@@ -98,6 +122,7 @@ impl UsageService {
         // Channel for receiving events from the Codex client
         let (mut event_tx, mut event_rx) = mpsc::unbounded_channel::<CodexEvent>();
         let mut reconnect = false;
+        let mut paused = false;
         let mut local_identity = crate::accounts::local_account()
             .ok()
             .flatten()
@@ -123,6 +148,19 @@ impl UsageService {
         });
 
         loop {
+            if paused {
+                match self.control_rx.recv().await {
+                    Some(MonitorControl::Resume) => {
+                        paused = false;
+                        reconnect = true;
+                    }
+                    Some(MonitorControl::Pause(ack)) => {
+                        let _ = ack.send(Ok(()));
+                    }
+                    None => return,
+                }
+                continue;
+            }
             if reconnect {
                 if let Some(old_client) = client.take() {
                     old_client.stop();
@@ -138,6 +176,17 @@ impl UsageService {
                 reconnect = false;
             }
             tokio::select! {
+                Some(control) = self.control_rx.recv() => {
+                    match control {
+                        MonitorControl::Pause(ack) => {
+                            let result = if let Some(c) = client.take() { c.stop_and_wait().await } else { Ok(()) };
+                            paused = result.is_ok();
+                            reconnect = true;
+                            let _ = ack.send(result);
+                        }
+                        MonitorControl::Resume => { reconnect = true; }
+                    }
+                }
                 // Process detection tick
                 _ = process_check_interval.tick() => {
                     if let Ok(account) = crate::accounts::local_account() {

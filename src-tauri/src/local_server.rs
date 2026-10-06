@@ -34,6 +34,7 @@ pub async fn start_server(
 
     let app = Router::new()
         .route("/api/usage", get(api_usage))
+        .route("/api/guard", get(api_guard))
         .route("/overlay", get(overlay_page))
         .route("/events", get(sse_events))
         .route("/health", get(health))
@@ -59,6 +60,14 @@ async fn api_usage(State(state): State<ServerState>) -> impl IntoResponse {
     Json(usage_payload(&*state.usage_state.read().await)).into_response()
 }
 
+async fn api_guard(State(state): State<ServerState>) -> impl IntoResponse {
+    let usage = state.usage_state.read().await;
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(crate::quota_guard::evaluate(&usage, chrono::Utc::now())),
+    )
+}
+
 /// Account changes and quota updates use the same payload so external overlays
 /// clear stale usage on sign-out just as the dashboard does.
 pub(crate) fn usage_payload(usage: &UsageState) -> serde_json::Value {
@@ -80,6 +89,10 @@ pub(crate) fn usage_payload(usage: &UsageState) -> serde_json::Value {
     }
     response.insert("planType".into(), serde_json::json!(snapshot.plan_type));
     response.insert("capturedAt".into(), serde_json::json!(snapshot.captured_at));
+    response.insert(
+        "guard".into(),
+        crate::quota_guard::evaluate(usage, chrono::Utc::now()),
+    );
     serde_json::Value::Object(response)
 }
 
