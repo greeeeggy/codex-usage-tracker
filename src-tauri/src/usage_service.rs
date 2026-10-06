@@ -182,6 +182,12 @@ impl UsageService {
                             let result = if let Some(c) = client.take() { c.stop_and_wait().await } else { Ok(()) };
                             paused = result.is_ok();
                             reconnect = true;
+                            if paused {
+                                reset_account_state(&mut *state.write().await);
+                                db_clone.set_active_account("__signed_out__");
+                                emit_accounts(&db_clone, &state, &app_handle).await;
+                                let _ = app_handle.emit("state-changed", "dormant");
+                            }
                             let _ = ack.send(result);
                         }
                         MonitorControl::Resume => { reconnect = true; }

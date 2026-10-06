@@ -5,6 +5,15 @@ use serde_json::{json, Value};
 pub const THRESHOLD: f64 = 5.0;
 pub fn evaluate(state: &UsageState, now: DateTime<Utc>) -> Value {
     let mut result = decision(state, now);
+    result["canResume"] = json!(
+        result["status"] == "ready"
+            && state.snapshot.as_ref().is_some_and(|s| s
+                .limits
+                .iter()
+                .flat_map(|b| b.windows.iter())
+                .chain(s.windows.iter())
+                .all(|w| w.remaining_percent.is_finite() && w.remaining_percent > 0.0))
+    );
     if result["status"] != "unavailable" {
         if let Some(snapshot) = &state.snapshot {
             result["windows"] = json!(snapshot.windows);
