@@ -37,12 +37,17 @@ pub fn rpc_result(request: &Value, guard: Result<Value, String>) -> Option<Value
         }
         "ping" => json!({}),
         "tools/list" => {
-            json!({"tools":[{"name":"get_usage_guard", "description":"Read fresh shared Codex allowance and the exact pause/handoff/resume instructions. Call before work and at checkpoints. No account switching or credentials exposed.", "inputSchema":{"type":"object","properties":{},"additionalProperties":false}, "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}]})
+            json!({"tools":[{"name":"get_usage_guard", "description":"Read fresh shared Codex allowance and the exact pause/handoff/resume instructions. Call before work and at checkpoints. No account switching or credentials exposed.", "inputSchema":{"type":"object","properties":{},"additionalProperties":false}, "annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}, {"name":"quota_checkpoint", "description":"Codex lifecycle hook: supply quota handoff context once per chat/turn/reset. Used by Meter's installed hooks; does not schedule or change accounts.", "inputSchema":{"type":"object","properties":{"hook_event_name":{"type":"string"},"session_id":{"type":"string"},"turn_id":{"type":"string"},"stop_hook_active":{"type":"boolean"}},"required":["hook_event_name","session_id"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}]})
         }
         "tools/call" if request["params"]["name"] == "get_usage_guard" => match guard {
             Ok(g) => json!({"content":[{"type":"text","text":g.to_string()}],"isError":false}),
             Err(e) => json!({"content":[{"type":"text","text":e}],"isError":true}),
         },
+        "tools/call" if request["params"]["name"] == "quota_checkpoint" => {
+            let guard = guard.unwrap_or_else(|_| json!({"shouldPause":false}));
+            let result = checkpoint_result(&request["params"]["arguments"], &guard);
+            json!({"content":[{"type":"text","text":result.to_string()}],"isError":false})
+        }
         _ => {
             return Some(
                 json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Unknown method or tool"}}),
@@ -103,6 +108,9 @@ pub fn run_hook() {
     let guard = rt
         .block_on(fetch_guard())
         .unwrap_or_else(|_| json!({"shouldPause":false}));
+    println!("{}", checkpoint_result(&input, &guard));
+}
+fn checkpoint_result(input: &Value, guard: &Value) -> Value {
     // One warning per chat/turn/reset; persistent across separate hook processes.
     use sha2::{Digest, Sha256};
     let key = format!(
@@ -123,9 +131,9 @@ pub fn run_hook() {
             let _ = crate::account_switch::atomic_write(&path, b"checkpoint delivered");
         }
     }
-    println!("{result}");
+    result
 }
-fn merge_hooks(mut document: Value, executable: &str, enabled: bool) -> Result<Value, String> {
+fn merge_hooks(mut document: Value, enabled: bool) -> Result<Value, String> {
     if !document.is_object() {
         return Err("Existing hooks.json is not an object; it was left unchanged".into());
     }
@@ -145,20 +153,29 @@ fn merge_hooks(mut document: Value, executable: &str, enabled: bool) -> Result<V
         // Only remove our own marked groups; preserve every unrelated handler.
         for group in groups.iter_mut() {
             if let Some(handlers) = group["hooks"].as_array_mut() {
-                handlers.retain(|h| {
-                    !(h["statusMessage"] == "Checking Codex allowance"
-                        && h["command"]
-                            .as_str()
-                            .is_some_and(|c| c.ends_with(" --quota-hook")))
-                });
+                handlers.retain(|h| !is_meter_hook(h));
             }
         }
         groups.retain(|g| g["hooks"].as_array().is_none_or(|h| !h.is_empty()));
         if enabled {
-            groups.push(json!({"matcher":if event=="PreToolUse" { ".*" } else { "" },"hooks":[{"type":"command","command":format!("\"{executable}\" --quota-hook"),"timeout":5,"statusMessage":"Checking Codex allowance"}]}));
+            let mut input = json!({"hook_event_name":event,"session_id":"${session_id}"});
+            if event != "SessionStart" {
+                input["turn_id"] = json!("${turn_id}");
+            }
+            if event == "Stop" {
+                input["stop_hook_active"] = json!("${stop_hook_active}");
+            }
+            groups.push(json!({"matcher":if event=="PreToolUse" { ".*" } else { "" },"hooks":[{"type":"mcp_tool","server":"codex-meter","tool":"quota_checkpoint","input":input,"timeout":5,"statusMessage":"Checking Codex allowance"}]}));
         }
     }
     Ok(document)
+}
+fn is_meter_hook(handler: &Value) -> bool {
+    (handler["server"] == "codex-meter" && handler["tool"] == "quota_checkpoint")
+        || (handler["statusMessage"] == "Checking Codex allowance"
+            && handler["command"]
+                .as_str()
+                .is_some_and(|c| c.ends_with(" --quota-hook")))
 }
 #[tauri::command]
 pub async fn get_usage_guard(
@@ -175,14 +192,9 @@ pub fn get_guard_integration() -> Result<Value, String> {
         .is_some_and(|v| {
             v["hooks"]["PreToolUse"].as_array().is_some_and(|groups| {
                 groups.iter().any(|g| {
-                    g["hooks"].as_array().is_some_and(|handlers| {
-                        handlers.iter().any(|h| {
-                            h["statusMessage"] == "Checking Codex allowance"
-                                && h["command"]
-                                    .as_str()
-                                    .is_some_and(|c| c.ends_with(" --quota-hook"))
-                        })
-                    })
+                    g["hooks"]
+                        .as_array()
+                        .is_some_and(|handlers| handlers.iter().any(|h| is_meter_hook(h)))
                 })
             })
         });
@@ -206,7 +218,7 @@ pub async fn configure_usage_guard(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
         Err(_) => return Err("Cannot read existing hooks".into()),
     };
-    let next = merge_hooks(document, &exe.to_string_lossy(), enabled)?;
+    let next = merge_hooks(document, enabled)?;
     let cli = crate::codex_client::find_codex_executable()?;
     let output = tauri::async_runtime::spawn_blocking(move || {
         let mut command = Command::new(cli);
@@ -243,7 +255,7 @@ mod tests {
     #[test]
     fn mcp_never_offers_switch_or_secret_tools() {
         let result = rpc_result(&json!({"id":1,"method":"tools/list"}), Ok(Value::Null)).unwrap();
-        assert_eq!(result["result"]["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(result["result"]["tools"].as_array().unwrap().len(), 2);
         assert_eq!(result["result"]["tools"][0]["name"], "get_usage_guard");
         assert!(rpc_result(
             &json!({"method":"notifications/initialized"}),
@@ -254,10 +266,10 @@ mod tests {
     #[test]
     fn preserves_unrelated_hooks_and_install_is_idempotent() {
         let original = json!({"description":"mine","hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"other.exe"}]}]}});
-        let once = merge_hooks(original, "C:\\Meter.exe", true).unwrap();
-        let twice = merge_hooks(once.clone(), "C:\\Meter.exe", true).unwrap();
+        let once = merge_hooks(original, true).unwrap();
+        let twice = merge_hooks(once.clone(), true).unwrap();
         assert_eq!(once, twice);
-        let removed = merge_hooks(twice, "C:\\Meter.exe", false).unwrap();
+        let removed = merge_hooks(twice, false).unwrap();
         assert_eq!(removed["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
         assert_eq!(removed["description"], "mine");
     }

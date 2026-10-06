@@ -33,12 +33,14 @@ try:
             {"jsonrpc": "2.0", "method": "notifications/initialized"},
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
             {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "get_usage_guard", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "quota_checkpoint", "arguments": {"hook_event_name": "PreToolUse", "session_id": "mcp-chat", "turn_id": "turn"}}},
         ]
         result = subprocess.run([exe, "--mcp"], input="\n".join(map(json.dumps, requests))+"\n", text=True, capture_output=True, env=env, timeout=15, check=True)
         responses = list(map(json.loads, result.stdout.splitlines()))
-        assert len(responses) == 3, result.stdout
+        assert len(responses) == 4, result.stdout
         assert responses[1]["result"]["tools"][0]["name"] == "get_usage_guard"
         assert json.loads(responses[2]["result"]["content"][0]["text"])["remainingPercent"] == 5
+        assert 'schedule this same chat' in json.loads(responses[3]["result"]["content"][0]["text"])["hookSpecificOutput"]["additionalContext"]
         event = {"hook_event_name": "PreToolUse", "session_id": "chat-a", "turn_id": "turn-a"}
         def hook(payload):
             output = subprocess.run([exe, "--quota-hook"], input=json.dumps(payload), text=True, capture_output=True, env=env, timeout=10, check=True)

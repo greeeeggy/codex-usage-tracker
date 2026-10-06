@@ -677,11 +677,19 @@ fn rand_id() -> u64 {
 fn normalize_snapshot(raw: &RawSnapshot) -> UsageSnapshot {
     let mut windows = Vec::new();
 
-    if let Some(primary) = &raw.primary {
+    if let Some(primary) = &raw
+        .primary
+        .as_ref()
+        .filter(|w| w.used_percent.is_some() || w.remaining_percent.is_some())
+    {
         windows.push(normalize_window("primary", primary));
     }
 
-    if let Some(secondary) = &raw.secondary {
+    if let Some(secondary) = &raw
+        .secondary
+        .as_ref()
+        .filter(|w| w.used_percent.is_some() || w.remaining_percent.is_some())
+    {
         windows.push(normalize_window("secondary", secondary));
     }
 

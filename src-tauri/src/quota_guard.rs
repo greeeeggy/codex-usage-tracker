@@ -4,6 +4,16 @@ use serde_json::{json, Value};
 
 pub const THRESHOLD: f64 = 5.0;
 pub fn evaluate(state: &UsageState, now: DateTime<Utc>) -> Value {
+    let mut result = decision(state, now);
+    if result["status"] != "unavailable" {
+        if let Some(snapshot) = &state.snapshot {
+            result["windows"] = json!(snapshot.windows);
+            result["limits"] = json!(snapshot.limits);
+        }
+    }
+    result
+}
+fn decision(state: &UsageState, now: DateTime<Utc>) -> Value {
     let unavailable = |reason: &str| json!({"status":"unavailable", "shouldPause":false, "thresholdPercent":THRESHOLD, "reason":reason, "prompt":null, "resumeAt":null});
     let Some(snapshot) = &state.snapshot else {
         return unavailable("No live usage data; do not assume quota is available.");

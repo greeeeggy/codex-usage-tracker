@@ -21,12 +21,15 @@ if ($request.action -eq 'locate') {
 }
 if ($exe -ne $request.exe) { throw 'Codex installation changed; retry switching.' }
 if ($request.action -eq 'close') {
+    # Package children include the bundled app-server, which can still refresh auth.
+    $packageRoot = if ($package) { $package.InstallLocation.TrimEnd('\') + '\' } else { (Split-Path -Parent $exe).TrimEnd('\') + '\' }
+    $isDesktopProcess = { $_.Path -and ($_.Path -eq $exe -or $_.Path.StartsWith($packageRoot, [StringComparison]::OrdinalIgnoreCase)) }
     $processes = @(Get-Process | Where-Object { $_.Path -eq $exe })
     foreach ($process in $processes) {
         if ($process.MainWindowHandle -ne 0) { $null = $process.CloseMainWindow() }
     }
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
-    while (@(Get-Process | Where-Object { $_.Path -eq $exe }).Count -gt 0) {
+    while (@(Get-Process | Where-Object $isDesktopProcess).Count -gt 0) {
         if ([DateTime]::UtcNow -gt $deadline) { throw 'Codex did not close normally. Finish or stop its active work and retry. Credentials were not changed.' }
         Start-Sleep -Milliseconds 250
     }
