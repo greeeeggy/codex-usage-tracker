@@ -932,6 +932,12 @@ mod tests {
 mod bucket_tests {
     use super::*;
     #[test]
+    fn missing_usage_percentage_is_not_reported_as_full_allowance() {
+        let result = serde_json::json!({"rateLimits":{"primary":{"windowDurationMins":300,"resetsAt":1800000000}}});
+        let snapshot = parse_rate_limits(&result).unwrap();
+        assert!(snapshot.windows.is_empty());
+    }
+    #[test]
     fn map_reads_every_bucket_and_deduplicates_legacy() {
         let result = serde_json::json!({"rateLimitsByLimitId": {
             "codex": {"primary": {"windowDurationMins": 300, "usedPercent": 10, "resetsAt": 1800000000}},

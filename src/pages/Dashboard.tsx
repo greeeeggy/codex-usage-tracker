@@ -463,10 +463,10 @@ export function Dashboard() {
   return (
     <div className="dashboard-content space-y-4">
       <DashboardHeader />
-      {savedAccount && <p className="text-sm" style={{ color: 'var(--text-muted)' }}>
+      {savedAccount && activePage !== 'switch' && activePage !== 'guard' && <p className="text-sm" style={{ color: 'var(--text-muted)' }}>
         Showing saved usage for this account. Sign into it in Codex to update its quotas.
       </p>}
-      <div key={accountKey}>{renderActiveView()}</div>
+      <div key={activePage === 'switch' || activePage === 'guard' ? activePage : accountKey}>{renderActiveView()}</div>
     </div>
   );
 }

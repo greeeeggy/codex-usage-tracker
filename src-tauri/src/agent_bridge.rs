@@ -180,8 +180,11 @@ fn is_meter_hook(handler: &Value) -> bool {
 #[tauri::command]
 pub async fn get_usage_guard(
     state: tauri::State<'_, std::sync::Arc<tokio::sync::RwLock<crate::usage_service::UsageState>>>,
-) -> Value {
-    crate::quota_guard::evaluate(&*state.read().await, chrono::Utc::now())
+) -> Result<Value, String> {
+    Ok(crate::quota_guard::evaluate(
+        &*state.read().await,
+        chrono::Utc::now(),
+    ))
 }
 #[tauri::command]
 pub fn get_guard_integration() -> Result<Value, String> {
