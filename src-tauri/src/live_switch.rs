@@ -636,6 +636,15 @@ impl Broker {
         if vault::profile(&bytes)?.account_key != saved.account.account_key {
             return Err("Saved login identity does not match".into());
         }
+        // The file can already contain this account's newer credentials while
+        // the desktop still caches another login. Use those credentials, but
+        // still send login/start and confirm the actual running engine.
+        let bytes = fs::read(self.home.join("auth.json"))
+            .ok()
+            .filter(|bytes| {
+                vault::profile(bytes).is_ok_and(|p| p.account_key == saved.account.account_key)
+            })
+            .unwrap_or(bytes);
         let previous = self.runtime_auth().await?;
         vault::save(&directory, &previous.bytes, "")?;
         let mut target =
