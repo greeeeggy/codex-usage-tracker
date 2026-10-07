@@ -638,12 +638,33 @@ impl Broker {
         }
         let previous = self.runtime_auth().await?;
         vault::save(&directory, &previous.bytes, "")?;
-        let target = Auth::parse(refresh_auth(bytes, &saved.account.account_key, false).await?)?;
+        let mut target =
+            Auth::parse(refresh_auth(bytes, &saved.account.account_key, false).await?)?;
+        // A successful OAuth rotation must survive a later activation failure.
+        vault::save(&directory, &target.bytes, &saved.label)?;
         self.activity.lock().unwrap().auth = Some(target.clone());
         let result = async {
-            self.request("account/login/start", target.params.clone())
-                .await?;
-            self.confirm(&target).await?;
+            let first = async {
+                self.request("account/login/start", target.params.clone())
+                    .await?;
+                self.confirm(&target).await
+            }
+            .await;
+            if first
+                .as_ref()
+                .is_err_and(|error| error == "The selected login needs renewal")
+            {
+                target = Auth::parse(
+                    refresh_auth(target.bytes.clone(), &saved.account.account_key, true).await?,
+                )?;
+                vault::save(&directory, &target.bytes, &saved.label)?;
+                self.activity.lock().unwrap().auth = Some(target.clone());
+                self.request("account/login/start", target.params.clone())
+                    .await?;
+                self.confirm(&target).await?;
+            } else {
+                first?;
+            }
             vault::save(&directory, &target.bytes, &saved.label)?;
             vault::atomic_write(&self.home.join("auth.json"), &target.bytes)?;
             Ok::<(), String>(())
@@ -935,7 +956,13 @@ async fn proxy() -> Result<(), String> {
                 if let Ok(message)=serde_json::from_str::<Value>(&line) {
                     if let Some(id)=message["id"].as_str() {
                         if id.starts_with("meter-auth:") {
-                            if let Some(pending)=broker.pending.lock().unwrap().remove(id) { let response=if message.get("error").is_some() { Err("Codex rejected the authentication request".into()) } else { Ok(message["result"].clone()) }; let _=pending.send(response); }
+                            if let Some(pending)=broker.pending.lock().unwrap().remove(id) {
+                                let response=if message.get("error").is_some() {
+                                    let error=message["error"]["message"].as_str().unwrap_or("").to_ascii_lowercase();
+                                    Err(if error.contains("unauthorized") || error.contains("(401)") { "The selected login needs renewal".into() } else { "Codex rejected the authentication request".into() })
+                                } else { Ok(message["result"].clone()) };
+                                let _=pending.send(response);
+                            }
                             continue;
                         }
                     }

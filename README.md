@@ -47,6 +47,8 @@ Setup installs a local launcher through the desktop's `CODEX_CLI_PATH` override 
 
 The bridge opts into the experimental `chatgptAuthTokens` login API, handles host-owned token renewal, and uses native ChatGPT HTTP streaming to avoid sockets retaining the outgoing login. Native OpenAI chat starts, resumes, and forks use that transport. This is an experimental integration with desktop internals; a future desktop release may require an update. A desktop update that removes the cached engine is handled by rediscovering the installed engine. Updating Meter's bridge while it is in use needs one normal Codex quit/reopen.
 
+Sign-in and renewal prefer the installed desktop engine over an older global npm CLI. If OpenAI rejects a saved token before its expiry, Meter attempts one renewal and retains rotated credentials even if desktop activation fails. A revoked refresh grant needs to be reconnected once through **Add another account**.
+
 Finish or stop active work and voice before switching; Meter refuses busy connections. Failed confirmation attempts restore the engine's preceding login. Existing CLI/editor sessions are not restarted. Chats, workspace files, and recorded usage remain in place. File-based ChatGPT credentials are required; keyring-only and API-key logins are not supported. Revoked logins can be replaced through **Add another account**. Removing a saved login retains recorded usage.
 
 ### Usage Guard and AI connection

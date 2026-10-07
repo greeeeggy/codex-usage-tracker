@@ -650,7 +650,26 @@ pub(crate) fn find_codex_executable() -> Result<PathBuf, String> {
     let appdata = std::env::var_os("APPDATA");
     let path = std::env::var_os("PATH");
     let mut failures = Vec::new();
-    for candidate in codex_executable_candidates(appdata.as_deref(), path.as_deref()) {
+    // Use the desktop's current engine for OAuth and monitoring as well as the
+    // bridge, so an older global npm CLI cannot supply incompatible auth state.
+    let mut candidates: Vec<PathBuf> = std::env::var_os("LOCALAPPDATA")
+        .into_iter()
+        .flat_map(|root| {
+            std::fs::read_dir(PathBuf::from(root).join("OpenAI/Codex/bin"))
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("codex.exe"))
+        .filter(|p| p.is_file())
+        .collect();
+    candidates
+        .sort_by_key(|p| std::cmp::Reverse(std::fs::metadata(p).and_then(|m| m.modified()).ok()));
+    candidates.extend(codex_executable_candidates(
+        appdata.as_deref(),
+        path.as_deref(),
+    ));
+    for candidate in candidates {
         if !candidate.is_file() {
             continue;
         }
