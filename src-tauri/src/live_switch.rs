@@ -360,11 +360,23 @@ pub(crate) async fn refresh_auth(
             return Ok(bytes);
         }
     }
-    let home = meter_root()?.join(format!("bridge/refresh-{}", uuid::Uuid::new_v4()));
-    vault::atomic_write(&home.join("auth.json"), &bytes)?;
+    // Renew the active file through its own home so the official engine can
+    // coordinate refresh-token rotation with Meter's monitoring process.
+    // Inactive accounts use an isolated home until activation is confirmed.
+    let global = vault::codex_home()?;
+    let shared = force
+        && crate::accounts::local_account_at(&global)?.is_some_and(|p| p.account_key == expected);
+    let home = if shared {
+        global
+    } else {
+        meter_root()?.join(format!("bridge/refresh-{}", uuid::Uuid::new_v4()))
+    };
+    if !shared {
+        vault::atomic_write(&home.join("auth.json"), &bytes)?;
+    }
     let (tx, _rx) = mpsc::unbounded_channel();
     let mut client = crate::codex_client::CodexClient::in_home(tx, home.clone());
-    let result = async {
+    let result = timeout(Duration::from_secs(8), async {
         client.start().await?;
         let fresh =
             fs::read(home.join("auth.json")).map_err(|_| "Could not read refreshed login")?;
@@ -372,14 +384,17 @@ pub(crate) async fn refresh_auth(
             return Err("Refreshed login belongs to a different account".into());
         }
         Ok(fresh)
-    }
-    .await;
+    })
+    .await
+    .map_err(|_| "Login renewal timed out; reconnect the account in Switch".to_string())
+    .and_then(|result| result);
     let _ = client.stop_and_wait().await;
-    if home
-        .canonicalize()
-        .ok()
-        .zip(meter_root()?.canonicalize().ok())
-        .is_some_and(|(path, root)| path.starts_with(root.join("bridge")))
+    if !shared
+        && home
+            .canonicalize()
+            .ok()
+            .zip(meter_root()?.canonicalize().ok())
+            .is_some_and(|(path, root)| path.starts_with(root.join("bridge")))
     {
         let _ = fs::remove_dir_all(&home);
     }
@@ -416,6 +431,7 @@ struct Activity {
     voice: HashSet<String>,
     account: Option<AccountProfile>,
     auth: Option<Auth>,
+    opt_out: HashSet<String>,
 }
 impl Activity {
     fn busy(&self) -> bool {
@@ -424,6 +440,12 @@ impl Activity {
     fn input(&mut self, message: &Value) {
         if message["method"] == "initialize" {
             self.initialize_id = Some(message["id"].to_string());
+            self.opt_out = message["params"]["capabilities"]["optOutNotificationMethods"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect();
         }
         if message["method"] == "turn/start" || message["method"] == "thread/realtime/start" {
             self.pending.insert(message["id"].to_string());
@@ -531,6 +553,12 @@ impl Broker {
             .as_str()
             .filter(|s| !s.is_empty())
             .ok_or("The desktop has no ChatGPT login")?;
+        let owned = self.activity.lock().unwrap().auth.clone();
+        if let Some(owned) = owned.filter(|a| a.params["accessToken"] == token) {
+            self.confirm(&owned).await?;
+            self.activity.lock().unwrap().account = Some(owned.profile.clone());
+            return Ok(owned);
+        }
         let runtime = crate::accounts::from_auth(&json!({"tokens":{"id_token":token}}));
         let mut candidates = vec![];
         if let Some(active) = self.activity.lock().unwrap().auth.clone() {
@@ -623,6 +651,7 @@ impl Broker {
                 && self.confirm(&previous).await.is_ok()
             {
                 self.activity.lock().unwrap().account = Some(previous.profile);
+                vault::atomic_write(&self.home.join("auth.json"), &previous.bytes).map_err(|_|format!("{error}. The desktop login was restored, but its saved launch credentials need recovery."))?;
                 return Err(format!("{error}. The previous desktop login was restored."));
             }
             self.activity.lock().unwrap().account = None;
@@ -694,6 +723,16 @@ fn authorized(headers: &HeaderMap, state: &HttpState) -> bool {
     headers.get("Authorization").and_then(|v| v.to_str().ok())
         == Some(format!("Bearer {}", state.capability).as_str())
 }
+fn watches_activity(method: &str) -> bool {
+    matches!(
+        method,
+        "turn/started"
+            | "turn/completed"
+            | "thread/realtime/started"
+            | "thread/realtime/closed"
+            | "thread/closed"
+    )
+}
 fn prepare_input(message: &mut Value) {
     if message["method"] == "initialize" {
         if !message["params"].is_object() {
@@ -703,6 +742,11 @@ fn prepare_input(message: &mut Value) {
             message["params"]["capabilities"] = json!({});
         }
         message["params"]["capabilities"]["experimentalApi"] = json!(true);
+        if let Some(methods) =
+            message["params"]["capabilities"]["optOutNotificationMethods"].as_array_mut()
+        {
+            methods.retain(|m| !m.as_str().is_some_and(watches_activity));
+        }
     }
     if matches!(
         message["method"].as_str(),
@@ -856,9 +900,9 @@ async fn proxy() -> Result<(), String> {
             let Ok(mut message) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
-            prepare_input(&mut message);
             let _gate = input_broker.gate.read().await;
             input_broker.activity.lock().unwrap().input(&message);
+            prepare_input(&mut message);
             if input_broker.send(&message).await.is_err() {
                 break;
             }
@@ -890,6 +934,7 @@ async fn proxy() -> Result<(), String> {
                     }
                     broker.activity.lock().unwrap().output(&message);
                     if message["method"]=="account/chatgptAuthTokens/refresh" && broker.activity.lock().unwrap().auth.is_some() { let b=broker.clone(); tokio::spawn(async move { let response=b.renew(message).await; let _=b.send(&response).await; }); continue; }
+                    if message["method"].as_str().is_some_and(|method|watches_activity(method) && broker.activity.lock().unwrap().opt_out.contains(method)) { continue; }
                 }
                 let _=output_tx.send(line);
             },
@@ -922,6 +967,21 @@ mod tests {
         let mut other = json!({"method":"thread/start","params":{"modelProvider":"custom"}});
         prepare_input(&mut other);
         assert_eq!(other["params"]["modelProvider"], "custom");
+    }
+    #[test]
+    fn observes_activity_even_when_desktop_opts_out_of_notifications() {
+        let mut input = json!({"id":1,"method":"initialize","params":{"capabilities":{"optOutNotificationMethods":["turn/completed","unknown/event"]}}});
+        let mut activity = Activity::default();
+        activity.input(&input);
+        prepare_input(&mut input);
+        assert_eq!(
+            input["params"]["capabilities"]["optOutNotificationMethods"],
+            json!(["unknown/event"])
+        );
+        assert!(activity.opt_out.contains("turn/completed"));
+        activity.output(&json!({"method":"turn/started","params":{"turn":{"id":"busy"}}}));
+        activity.output(&json!({"method":"turn/completed","params":{"turn":{"id":"busy"}}}));
+        assert!(!activity.busy());
     }
     #[test]
     fn blocks_switching_during_turns_pending_starts_and_voice() {

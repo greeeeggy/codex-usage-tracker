@@ -53,7 +53,7 @@ export function SwitchAccounts() {
   const run = async (action: () => Promise<unknown>, success: string) => {
     setBusy(true); setError(''); setMessage('');
     try { const result = await action(); setMessage(typeof result === 'string' ? result : success); await reload(); }
-    catch (e) { setError(String(e)); }
+    catch (e) { setMessage(''); setError(String(e)); }
     finally { setBusy(false); }
   };
   const active = status.live.runtimeAccount?.accountKey;

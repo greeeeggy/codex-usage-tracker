@@ -26,3 +26,4 @@ playwright-report
 test-results
 downloads
 release-download
+__pycache__/

@@ -133,7 +133,7 @@ def run(executable):
             assert response["id"] == counter, response
             return response["result"]
         try:
-            initialized = rpc("initialize", {"clientInfo": {"name": "desktop_fixture", "version": "1"}, "capabilities": {"experimentalApi": False, "optOutNotificationMethods": ["unknown/notification"]}})
+            initialized = rpc("initialize", {"clientInfo": {"name": "desktop_fixture", "version": "1"}, "capabilities": {"experimentalApi": False, "optOutNotificationMethods": ["turn/completed", "unknown/notification"]}})
             assert initialized["capabilities"] == {"experimentalApi": True, "optOutNotificationMethods": ["unknown/notification"]}
             assert "model_providers.meter-live.supports_websockets=false" in initialized["arguments"]
             engine_pid = initialized["enginePid"]
@@ -161,6 +161,12 @@ def run(executable):
             rpc("fixture/endVoice")
             # Reproduce the bug: disk already says B, desktop engine still says A.
             (home / "auth.json").write_text(json.dumps(fixtures["b"]), encoding="utf-8")
+            rpc("fixture/reject", {"enabled": True})
+            code, failed = control("select", {"id": saved[1]["id"]})
+            assert code == 409 and "restored" in failed["error"], failed
+            assert json.loads((home / "auth.json").read_text())["tokens"]["account_id"] == "a"
+            rpc("fixture/reject", {"enabled": False})
+            (home / "auth.json").write_text(json.dumps(fixtures["b"]), encoding="utf-8")
             code, switched = control("select", {"id": saved[1]["id"]})
             assert code == 200, switched
             assert switched["account"]["accountKey"] == profile("b")["accountKey"]
@@ -184,6 +190,7 @@ def run(executable):
             # The same upstream remains alive after both directions and recovery.
             assert rpc("fixture/pid")["pid"] == engine_pid and process.poll() is None
             assert any(v["method"] == "account/updated" for v in notifications)
+            assert not any(v["method"] == "turn/completed" for v in notifications)
             print("Packaged live switching passed: A/B cached-file mismatch, engine confirmation, unchanged process, busy/voice guards, private RPCs, renewal routing, rollback, and transparent traffic.")
         finally:
             process.stdin.close()
