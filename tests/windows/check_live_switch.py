@@ -63,6 +63,9 @@ for line in sys.stdin:
   result = {"userAgent": "fixture", "capabilities": params["capabilities"], "arguments": sys.argv[1:], "enginePid": os.getpid()}
  elif method == "getAuthStatus": result = {"authToken": current, "authMethod": "chatgptAuthTokens"}
  elif method == "account/read":
+  if current.endswith("-stale"):
+   send({"id": message["id"], "error": {"code": -32603, "message": "workspace routing discovery unauthorized (401)"}})
+   continue
   import base64
   claims = json.loads(base64.urlsafe_b64decode(current.split('.')[1] + '=='))
   result = {"account": {"type": "chatgpt", "email": claims["email"], "planType": "plus"}}
@@ -106,7 +109,9 @@ def run(executable):
         fixtures = {name: login(name) for name in ("a", "b")}
         for name in ("a", "b"):
             identifier = str(uuid.uuid4())
-            raw = json.dumps(fixtures[name]).encode()
+            snapshot = json.loads(json.dumps(fixtures[name]))
+            if name == "b": snapshot["tokens"]["access_token"] += "-stale"
+            raw = json.dumps(snapshot).encode()
             (directory / f"{identifier}.dpapi").write_bytes(protect(raw, True))
             saved.append({"id": identifier, "label": name.upper(), "account": profile(name), "savedAt": "2026-10-08T00:00:00Z"})
         (directory / "profiles.json").write_text(json.dumps(saved), encoding="utf-8")
