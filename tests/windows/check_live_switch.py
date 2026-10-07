@@ -51,6 +51,7 @@ from pathlib import Path
 home = Path(os.environ["CODEX_HOME"])
 current = json.loads((home / "auth.json").read_text())["tokens"]["access_token"]
 reject = False
+challenges = {}
 def send(value):
  print(json.dumps(value), flush=True)
 for line in sys.stdin:
@@ -67,8 +68,10 @@ for line in sys.stdin:
   result = {"account": {"type": "chatgpt", "email": claims["email"], "planType": "plus"}}
  elif method == "account/login/start":
   if not reject: current = params["accessToken"]
-  result = {"type": "chatgptAuthTokens"}
-  send({"method": "account/updated", "params": {"authMode": "chatgptAuthTokens", "planType": "plus"}})
+  challenge = "challenge:" + str(message["id"])
+  challenges[challenge] = message["id"]
+  send({"id": challenge, "method": "fixture/authChallenge", "params": {}})
+  continue
  elif method == "turn/start":
   result = {"turn": {"id": "active", "status": "inProgress"}}
   send({"method": "turn/started", "params": result})
@@ -81,6 +84,9 @@ for line in sys.stdin:
  elif method == "fixture/refresh":
   send({"id": "renew", "method": "account/chatgptAuthTokens/refresh", "params": {"previousAccountId": "wrong-account", "reason": "unauthorized"}})
  elif not method:
+  if message.get("id") in challenges:
+   send({"id": challenges.pop(message["id"]), "result": {"type": "chatgptAuthTokens"}})
+   send({"method": "account/updated", "params": {"authMode": "chatgptAuthTokens", "planType": "plus"}})
   if message.get("id") == "renew": send({"method": "fixture/refreshResult", "params": {"hasError": "error" in message}})
   continue
  else: result = params
@@ -116,19 +122,32 @@ def run(executable):
         replies = queue.Queue()
         notifications = []
         seen = []
+        write_lock = threading.Lock()
+        def send(value):
+            with write_lock:
+                process.stdin.write(json.dumps(value) + "\n")
+                process.stdin.flush()
+        challenges = {}
         def read():
             for line in process.stdout:
                 value = json.loads(line)
                 seen.append(value)
-                if "method" in value: notifications.append(value)
+                if value.get("method") == "fixture/authChallenge":
+                    # A host must be able to read the selected auth and then
+                    # answer an engine request while the selection is locked.
+                    identifier = f"desktop-auth-read:{len(seen)}"
+                    challenges[identifier] = value["id"]
+                    send({"id": identifier, "method": "getAuthStatus", "params": {"includeToken": True, "refreshToken": False}})
+                elif value.get("id") in challenges:
+                    send({"id": challenges.pop(value["id"]), "result": {"signature": "fixture"}})
+                elif "method" in value: notifications.append(value)
                 else: replies.put(value)
         threading.Thread(target=read, daemon=True).start()
         counter = 0
         def rpc(method, params=None):
             nonlocal counter
             counter += 1
-            process.stdin.write(json.dumps({"id": counter, "method": method, "params": params or {}}) + "\n")
-            process.stdin.flush()
+            send({"id": counter, "method": method, "params": params or {}})
             response = replies.get(timeout=15)
             assert response["id"] == counter, response
             return response["result"]
@@ -191,7 +210,7 @@ def run(executable):
             assert rpc("fixture/pid")["pid"] == engine_pid and process.poll() is None
             assert any(v["method"] == "account/updated" for v in notifications)
             assert not any(v["method"] == "turn/completed" for v in notifications)
-            print("Packaged live switching passed: A/B cached-file mismatch, engine confirmation, unchanged process, busy/voice guards, private RPCs, renewal routing, rollback, and transparent traffic.")
+            print("Packaged live switching passed: A/B cached-file mismatch, engine confirmation, unchanged process, busy/voice guards, private RPCs, authentication callbacks, renewal routing, rollback, and transparent traffic.")
         finally:
             process.stdin.close()
             try: process.wait(timeout=8)

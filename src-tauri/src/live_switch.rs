@@ -761,6 +761,22 @@ fn watches_activity(method: &str) -> bool {
             | "thread/closed"
     )
 }
+fn can_forward_during_switch(message: &Value) -> bool {
+    // Host authentication/attestation callbacks can need account reads and
+    // server-request replies before login completes. Blocking these deadlocks
+    // confirmation; commands that start work or change auth still wait.
+    message.get("method").is_none()
+        || matches!(
+            message["method"].as_str(),
+            Some(
+                "getAuthStatus"
+                    | "account/read"
+                    | "account/rateLimits/read"
+                    | "account/usage/read"
+                    | "config/read"
+            )
+        )
+}
 fn prepare_input(message: &mut Value) {
     if message["method"] == "initialize" {
         if !message["params"].is_object() {
@@ -928,6 +944,12 @@ async fn proxy() -> Result<(), String> {
             let Ok(mut message) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
+            if can_forward_during_switch(&message) {
+                if input_broker.send(&message).await.is_err() {
+                    break;
+                }
+                continue;
+            }
             let _gate = input_broker.gate.read().await;
             input_broker.activity.lock().unwrap().input(&message);
             prepare_input(&mut message);
