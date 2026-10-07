@@ -150,6 +150,7 @@ pub struct CodexClient {
     event_tx: mpsc::UnboundedSender<CodexEvent>,
     command_tx: Option<mpsc::UnboundedSender<ClientCommand>>,
     account: Arc<Mutex<Option<crate::accounts::AccountProfile>>>,
+    home_override: Option<PathBuf>,
 }
 
 enum ClientCommand {
@@ -172,16 +173,23 @@ impl CodexClient {
             event_tx,
             command_tx: None,
             account: Arc::new(Mutex::new(None)),
+            home_override: None,
         }
     }
 
     /// Start the Codex app-server process and begin communication
     pub async fn start(&mut self) -> Result<(), String> {
-        let starting_identity = crate::accounts::local_account()?.map(|a| a.account_key);
+        let starting_identity = self.local_account()?.map(|a| a.account_key);
         let codex_path = find_codex_executable()?;
         log::info!("[CODEX] Found executable: {}", codex_path.display());
 
-        let mut child = Command::new(&codex_path)
+        let mut command = Command::new(&codex_path);
+        if let Some(home) = &self.home_override {
+            command
+                .env("CODEX_HOME", home)
+                .args(["-c", "cli_auth_credentials_store=\"file\""]);
+        }
+        let mut child = command
             .args(["app-server", "--listen", "stdio://"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -445,8 +453,9 @@ impl CodexClient {
 
         // Send initialized notification
         self.notify("initialized", None);
-        self.read_account().await?;
-        if starting_identity != crate::accounts::local_account()?.map(|a| a.account_key) {
+        self.read_account_with_refresh(self.home_override.is_some())
+            .await?;
+        if starting_identity != self.local_account()?.map(|a| a.account_key) {
             return Err("Codex account changed while connecting; reconnecting".into());
         }
 
@@ -506,6 +515,18 @@ impl CodexClient {
         self.account.lock().unwrap().clone()
     }
 
+    pub fn in_home(event_tx: mpsc::UnboundedSender<CodexEvent>, home: PathBuf) -> Self {
+        let mut client = Self::new(event_tx);
+        client.home_override = Some(home);
+        client
+    }
+    fn local_account(&self) -> Result<Option<crate::accounts::AccountProfile>, String> {
+        match &self.home_override {
+            Some(home) => crate::accounts::local_account_at(home),
+            None => crate::accounts::local_account(),
+        }
+    }
+
     pub(crate) fn has_current_identity(&self) -> bool {
         self.account()
             .is_some_and(|a| self.check_identity(&a).is_ok())
@@ -516,10 +537,7 @@ impl CodexClient {
             return Err("Codex account changed; reconnecting".into());
         }
         if !account.account_key.starts_with("chatgpt-email:")
-            && crate::accounts::local_account()?
-                .as_ref()
-                .map(|a| &a.account_key)
-                != Some(&account.account_key)
+            && self.local_account()?.as_ref().map(|a| &a.account_key) != Some(&account.account_key)
         {
             return Err("Codex account changed; reconnecting".into());
         }
@@ -527,13 +545,19 @@ impl CodexClient {
     }
 
     pub async fn read_account(&self) -> Result<Option<crate::accounts::AccountProfile>, String> {
+        self.read_account_with_refresh(false).await
+    }
+    async fn read_account_with_refresh(
+        &self,
+        refresh: bool,
+    ) -> Result<Option<crate::accounts::AccountProfile>, String> {
         let result = self
             .request(
                 "account/read",
-                Some(serde_json::json!({"refreshToken":false})),
+                Some(serde_json::json!({"refreshToken":refresh})),
             )
             .await?;
-        let profile = crate::accounts::from_response(&result, crate::accounts::local_account()?)?;
+        let profile = crate::accounts::from_response(&result, self.local_account()?)?;
         *self.account.lock().unwrap() = profile.clone();
         Ok(profile)
     }

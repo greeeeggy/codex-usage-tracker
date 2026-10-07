@@ -91,6 +91,10 @@ pub fn local_account() -> Result<Option<AccountProfile>, String> {
     let home = crate::session_history::sessions_dir()
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
         .ok_or("Cannot locate Codex account")?;
+    local_account_at(&home)
+}
+
+pub(crate) fn local_account_at(home: &std::path::Path) -> Result<Option<AccountProfile>, String> {
     let bytes = match std::fs::read(home.join("auth.json")) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),

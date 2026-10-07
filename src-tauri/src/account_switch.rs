@@ -1,7 +1,7 @@
 //! Saved credentials stay local, encrypted with Windows DPAPI; only metadata crosses IPC.
 use crate::accounts::{self, AccountProfile};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::{
     fs,
     io::Write,
@@ -43,7 +43,7 @@ unsafe extern "system" {
     fn LocalFree(memory: *mut u8) -> *mut u8;
     fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
 }
-fn crypt(bytes: &[u8], encrypt: bool) -> Result<Vec<u8>, String> {
+pub(crate) fn crypt(bytes: &[u8], encrypt: bool) -> Result<Vec<u8>, String> {
     let input = Blob {
         size: bytes
             .len()
@@ -117,7 +117,7 @@ pub(crate) fn codex_home() -> Result<PathBuf, String> {
         .and_then(|p| p.parent().map(Path::to_path_buf))
         .ok_or("Cannot locate CODEX_HOME".into())
 }
-fn profile(bytes: &[u8]) -> Result<AccountProfile, String> {
+pub(crate) fn profile(bytes: &[u8]) -> Result<AccountProfile, String> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| "Login file is invalid")?;
     let profile = accounts::from_auth(&value).ok_or("A file-based ChatGPT login is required. Keyring-only and API-key accounts cannot be saved here.")?;
     let tokens = &value["tokens"];
@@ -162,6 +162,13 @@ pub struct SwitchStatus {
     pub profiles: Vec<SavedLogin>,
     pub active_account: Option<AccountProfile>,
     pub login_pending: bool,
+    pub live: crate::live_switch::LiveStatus,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchOutcome {
+    pub account: AccountProfile,
+    pub message: String,
 }
 struct Login {
     child: Child,
@@ -179,7 +186,7 @@ fn root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map(|p| p.join("saved-logins"))
         .map_err(|_| "Cannot locate login storage".into())
 }
-fn list(directory: &Path) -> Result<Vec<SavedLogin>, String> {
+pub(crate) fn list(directory: &Path) -> Result<Vec<SavedLogin>, String> {
     match fs::read(directory.join("profiles.json")) {
         Ok(bytes) => {
             serde_json::from_slice(&bytes).map_err(|_| "Saved account metadata is damaged".into())
@@ -188,7 +195,7 @@ fn list(directory: &Path) -> Result<Vec<SavedLogin>, String> {
         Err(_) => Err("Cannot read saved accounts".into()),
     }
 }
-fn save(directory: &Path, bytes: &[u8], label: &str) -> Result<SavedLogin, String> {
+pub(crate) fn save(directory: &Path, bytes: &[u8], label: &str) -> Result<SavedLogin, String> {
     let account = profile(bytes)?;
     let mut profiles = list(directory)?;
     let previous = profiles
@@ -224,20 +231,23 @@ fn save(directory: &Path, bytes: &[u8], label: &str) -> Result<SavedLogin, Strin
     )?;
     Ok(saved)
 }
-fn validate_id(id: &str) -> Result<(), String> {
+pub(crate) fn validate_id(id: &str) -> Result<(), String> {
     uuid::Uuid::parse_str(id)
         .map(|_| ())
         .map_err(|_| "Invalid account selection".into())
 }
 #[tauri::command]
-pub fn get_switch_accounts(
+pub async fn get_switch_accounts(
     app: tauri::AppHandle,
-    manager: tauri::State<SwitchManager>,
+    manager: tauri::State<'_, SwitchManager>,
 ) -> Result<SwitchStatus, String> {
+    let login_pending = manager.login.lock().unwrap().is_some();
+    let live = crate::live_switch::status().await?;
     Ok(SwitchStatus {
         profiles: list(&root(&app)?)?,
         active_account: accounts::local_account()?,
-        login_pending: manager.login.lock().unwrap().is_some(),
+        login_pending,
+        live,
     })
 }
 #[tauri::command]
@@ -354,58 +364,6 @@ pub async fn cancel_account_login(manager: tauri::State<'_, SwitchManager>) -> R
     }
     Ok(())
 }
-fn desktop(request: Value) -> Result<Value, String> {
-    let mut child = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            include_str!("desktop_switch.ps1"),
-        ])
-        .creation_flags(0x08000000)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|_| "Could not control Codex Desktop")?;
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(request.to_string().as_bytes())
-        .map_err(|_| "Cannot contact desktop helper")?;
-    let output = child
-        .wait_with_output()
-        .map_err(|_| "Desktop helper failed")?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-    if output.stdout.is_empty() {
-        Ok(Value::Null)
-    } else {
-        serde_json::from_slice(&output.stdout).map_err(|_| "Invalid desktop response".into())
-    }
-}
-async fn desktop_async(request: Value) -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(move || desktop(request))
-        .await
-        .map_err(|_| "Desktop helper failed")?
-}
-async fn verify(key: &str) -> Result<(), String> {
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut client = crate::codex_client::CodexClient::new(tx);
-    let result = async {
-        client.start().await?;
-        if client.account().as_ref().map(|p| p.account_key.as_str()) != Some(key) {
-            return Err("Codex did not accept the selected account".into());
-        }
-        client.read_rate_limits().await?;
-        Ok(())
-    }
-    .await;
-    let stopped = client.stop_and_wait().await;
-    result.and(stopped)
-}
 #[tauri::command]
 pub async fn switch_codex_account(
     app: tauri::AppHandle,
@@ -413,7 +371,7 @@ pub async fn switch_codex_account(
     monitor: tauri::State<'_, crate::usage_service::MonitorController>,
     state: tauri::State<'_, Arc<tokio::sync::RwLock<crate::usage_service::UsageState>>>,
     id: String,
-) -> Result<(), String> {
+) -> Result<SwitchOutcome, String> {
     let _guard = manager
         .operation
         .try_lock()
@@ -423,56 +381,26 @@ pub async fn switch_codex_account(
     }
     require_file_storage(&codex_home()?)?;
     validate_id(&id)?;
-    let directory = root(&app)?;
-    let target = list(&directory)?
+    let target = list(&root(&app)?)?
         .into_iter()
         .find(|p| p.id == id)
         .ok_or("Saved account no longer exists")?;
-    let bytes = crypt(
-        &fs::read(directory.join(format!("{id}.dpapi"))).map_err(|_| "Saved login is missing")?,
-        false,
-    )?;
-    if profile(&bytes)?.account_key != target.account.account_key {
-        return Err("Saved login identity does not match".into());
+    let live = crate::live_switch::status().await?;
+    if live.connected == 0 {
+        return Err("Enable live switching, then quit and reopen Codex normally once. Wait for Desktop connected in Switch.".into());
     }
-    if accounts::local_account()?.as_ref().map(|p| &p.account_key)
-        == Some(&target.account.account_key)
-    {
-        return Ok(());
+    if live.busy {
+        return Err(
+            "Finish or stop active Codex work or voice before switching. Codex was left open."
+                .into(),
+        );
     }
-    let installation = desktop_async(json!({"action":"locate"})).await?;
-    let _ = app.emit("switch-progress", "Waiting for the usage monitor to stop…");
+    let _ = app.emit(
+        "switch-progress",
+        "Asking the running Codex engine to change accounts…",
+    );
     monitor.pause().await?;
-    let result = async {
-        let _ = app.emit("switch-progress", "Closing Codex normally…");
-        desktop_async(json!({"action":"close","exe":installation["exe"]})).await?;
-        let auth_path = codex_home()?.join("auth.json");
-        let previous = match fs::read(&auth_path) { Ok(bytes) => Some(bytes), Err(e) if e.kind() == std::io::ErrorKind::NotFound => None, Err(_) => return Err("Cannot back up the current login".into()) };
-        if let Some(previous) = &previous { save(&directory, previous, "")?; }
-        let activation = async {
-            let _ = app.emit("switch-progress", "Activating and verifying the selected account…");
-            atomic_write(&auth_path, &bytes)?;
-            verify(&target.account.account_key).await?;
-            // Preserve rotated refresh tokens after verification.
-            let refreshed = fs::read(&auth_path).map_err(|_| "Cannot save refreshed login")?;
-            save(&directory, &refreshed, &target.label)?;
-            let _ = app.emit("switch-progress", "Relaunching Codex…");
-            desktop_async(json!({"action":"open","exe":installation["exe"]})).await?;
-            Ok::<(), String>(())
-        }.await;
-        if let Err(error) = activation {
-            // Ensure the failed target desktop is gone before restoring credentials.
-            desktop_async(json!({"action":"close","exe":installation["exe"]})).await.map_err(|_| format!("{error} Recovery needs Codex to be closed; encrypted previous login is retained in Switch."))?;
-            let restored = if let Some(previous) = previous { atomic_write(&auth_path, &previous) } else { fs::remove_file(&auth_path).map_err(|_| "Cannot restore signed-out state".into()) };
-            restored.map_err(|_| format!("{error} Could not restore the previous login; its encrypted copy is retained in Switch."))?;
-            let _ = desktop_async(json!({"action":"open","exe":installation["exe"]})).await;
-            return Err(format!("{error} Previous login restored."));
-        }
-        Ok(())
-    }.await;
-    if result.is_err() {
-        let _ = desktop_async(json!({"action":"open","exe":installation["exe"]})).await;
-    }
+    let result = crate::live_switch::apply(&id).await;
     {
         let mut usage = state.write().await;
         usage.snapshot = None;
@@ -491,7 +419,14 @@ pub async fn switch_codex_account(
     );
     monitor.resume();
     let _ = app.emit("refresh-requested", ());
-    result
+    result?;
+    Ok(SwitchOutcome {
+        account: target.account,
+        message: format!(
+            "Codex is now using {}. Confirmed by its running engine; Codex stayed open.",
+            target.label
+        ),
+    })
 }
 #[cfg(test)]
 mod tests {

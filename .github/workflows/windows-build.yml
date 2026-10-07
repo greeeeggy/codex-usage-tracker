@@ -74,6 +74,8 @@ jobs:
           }
       - name: Check packaged usage API and AI bridge
         run: python tests/windows/check_agent_bridge.py release-download/Codex-Meter.exe
+      - name: Check packaged live account switching without restarting the engine
+        run: python tests/windows/check_live_switch.py release-download/Codex-Meter.exe
       - uses: actions/upload-artifact@v4
         with:
           name: Codex-Meter-Windows

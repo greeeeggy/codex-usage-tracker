@@ -28,6 +28,7 @@ test.beforeEach(async ({ page }) => {
     let savedLogins = profiles.slice(0, 2).map((account, index) => ({ id: `saved-${index}`, label: index ? 'Work' : 'Personal', account, savedAt: new Date().toISOString() }));
     let loginPending = false;
     let guardInstalled = false;
+    let liveEnabled = true;
     Object.assign(globalThis, {
       __meterEmit: emit,
       __meterSignIn: (key: string | null) => { active = key; emit('accounts-updated', { activeAccount: profiles.find(p => p.accountKey === key) ?? null, accounts: profiles }); emit('state-changed', key ? 'monitoring' : 'authRequired'); },
@@ -50,17 +51,21 @@ test.beforeEach(async ({ page }) => {
         const other = key === 'account-b';
         const localTokens = other ? { ...tokens, inputTokens: 4500, totalTokens: 5000 } : tokens;
         if (command === 'get_accounts') return { activeAccount: profiles.find(p => p.accountKey === active) ?? null, accounts: profiles };
-        if (command === 'get_switch_accounts') return { profiles: savedLogins, activeAccount: profiles.find(p => p.accountKey === active) ?? null, loginPending };
+        if (command === 'get_switch_accounts') {
+          const flags = globalThis as unknown as { __meterDisconnected?: boolean; __meterBusy?: boolean; __meterDiskMismatch?: boolean };
+          return { profiles: savedLogins, activeAccount: profiles.find(p => p.accountKey === (flags.__meterDiskMismatch ? 'account-b' : active)) ?? null, loginPending, live: { enabled: liveEnabled, connected: flags.__meterDisconnected ? 0 : 1, busy: !!flags.__meterBusy, runtimeAccount: profiles.find(p => p.accountKey === active) ?? null } };
+        }
+        if (command === 'configure_live_switching') { liveEnabled = args.enabled as boolean; return null; }
         if (command === 'save_current_login') { const saved = savedLogins.find(p => p.account.accountKey === active)!; saved.label = args.label as string || saved.label; return saved; }
         if (command === 'start_account_login') { loginPending = true; return null; }
         if (command === 'poll_account_login') return null;
         if (command === 'cancel_account_login') { loginPending = false; return null; }
         if (command === 'remove_saved_login') { savedLogins = savedLogins.filter(p => p.id !== args.id); return null; }
         if (command === 'switch_codex_account') {
-          if ((globalThis as unknown as { __meterSwitchFail?: boolean }).__meterSwitchFail) throw new Error('Codex did not close normally. Credentials were not changed.');
+          if ((globalThis as unknown as { __meterSwitchFail?: boolean }).__meterSwitchFail) throw new Error('The running Codex engine still uses another login. The previous desktop login was restored.');
           active = savedLogins.find(p => p.id === args.id)!.account.accountKey;
           emit('accounts-updated', { activeAccount: profiles.find(p => p.accountKey === active), accounts: profiles });
-          return null;
+          return { account: profiles.find(p => p.accountKey === active), message: `Codex is now using ${savedLogins.find(p => p.id === args.id)!.label}. Confirmed by its running engine; Codex stayed open.` };
         }
         if (command === 'get_guard_integration') return { installed: guardInstalled };
         if (command === 'configure_usage_guard') { guardInstalled = args.enabled as boolean; return { installed: guardInstalled }; }
@@ -104,19 +109,47 @@ test('Switch changes the live account and preserves separate quota history', asy
   await expect(page.getByRole('heading', { name: 'Switch accounts' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Switch to Personal' })).toBeDisabled();
   await page.getByRole('button', { name: 'Switch to Work' }).click();
-  await expect(page.getByRole('status')).toContainText('Codex relaunched with Work');
+  await expect(page.getByRole('status')).toContainText('Codex is now using Work');
   await expect(page.getByRole('button', { name: 'Switch to Work' })).toBeDisabled();
   await page.getByRole('navigation').getByRole('button', { name: 'Overview', exact: true }).click();
   await expect(page.getByRole('progressbar', { name: '5-hour quota remaining' })).toHaveAttribute('aria-valuenow', '30');
 });
 
-test('Failed normal close shows an error and keeps the original account active', async ({ page }) => {
+test('Failed engine confirmation shows an error and keeps the original account active', async ({ page }) => {
   await page.addInitScript(() => Object.assign(globalThis, { __meterSwitchFail: true }));
   await page.goto('/');
   await page.getByRole('navigation').getByRole('button', { name: 'Switch', exact: true }).click();
   await page.getByRole('button', { name: 'Switch to Work' }).click();
-  await expect(page.getByRole('alert')).toContainText('Credentials were not changed');
+  await expect(page.getByRole('alert')).toContainText('previous desktop login was restored');
   await expect(page.getByRole('button', { name: 'Switch to Personal' })).toBeDisabled();
+});
+
+test('Disk login mismatch does not mark the target as the current desktop account', async ({ page }) => {
+  await page.addInitScript(() => Object.assign(globalThis, { __meterDiskMismatch: true }));
+  await page.goto('/');
+  await page.getByRole('navigation').getByRole('button', { name: 'Switch', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Switch to Work' })).toBeEnabled();
+  await page.getByRole('button', { name: 'Switch to Work' }).click();
+  await expect(page.getByRole('status')).toContainText('Codex is now using Work');
+});
+
+test('Disconnected desktop explains the one-time setup and prevents a false switch', async ({ page }) => {
+  await page.addInitScript(() => Object.assign(globalThis, { __meterDisconnected: true }));
+  await page.goto('/');
+  await page.getByRole('navigation').getByRole('button', { name: 'Switch', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Switch to Work' })).toBeDisabled();
+  await expect(page.getByText(/Waiting for desktop connection/)).toBeVisible();
+  await page.getByRole('button', { name: 'Disable live switching' }).click();
+  await page.getByRole('button', { name: 'Enable live switching' }).click();
+  await expect(page.getByRole('status')).toContainText('Quit and reopen Codex normally once');
+});
+
+test('Active work or voice blocks switching while keeping Codex connected', async ({ page }) => {
+  await page.addInitScript(() => Object.assign(globalThis, { __meterBusy: true }));
+  await page.goto('/');
+  await page.getByRole('navigation').getByRole('button', { name: 'Switch', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Switch to Work' })).toBeDisabled();
+  await expect(page.getByText('Desktop connected. Finish or stop active work or voice before switching.')).toBeVisible();
 });
 
 test('New login can be cancelled without changing the active account', async ({ page }) => {

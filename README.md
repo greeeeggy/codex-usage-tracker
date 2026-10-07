@@ -39,11 +39,15 @@ Meter identifies users and account/workspaces by a hashed combination of their I
 
 ### Switch accounts
 
-1. Open **Switch**, give your current account a name, and choose **Save current account**.
-2. Give the second account a name and choose **Add another account**. Complete its official browser login once. This uses an isolated temporary Codex home and does not sign your current desktop out.
-3. Choose **Switch** beside the saved account. Meter pauses its own monitor, requests a normal desktop close, saves the outgoing login, atomically activates the chosen login, verifies account identity and quotas with Codex, and relaunches the desktop. A failed activation restores the outgoing login when the desktop can be closed safely.
+1. Open **Switch**, name your current login, and choose **Save current account**. Use **Add another account** to sign into each additional account once.
+2. Choose **Enable live switching**. Quit Codex normally once (including its tray process), then reopen it from Start. Wait for **Desktop connected** in Meter.
+3. Choose **Switch** beside a saved account. The running desktop engine adopts that login through its app-server connection. Meter compares its actual token and account response before reporting success. Codex stays open.
 
-Finish active work before switching. A desktop that cannot close normally causes the switch to stop before replacing credentials. Existing CLI/editor sessions are not terminated or relaunched. Switching shares the configured `CODEX_HOME` and keeps its chats and workspaces. File-based ChatGPT credentials are required; keyring-only, ephemeral, and API-key sign-ins are not supported. Expired/revoked logins can be replaced through **Add another account**. Removing a saved login retains its usage history.
+Setup installs a local launcher through the desktop's `CODEX_CLI_PATH` override and retains any previous override for **Disable live switching**. It does not modify the desktop installation or automatically close it. Replacing `auth.json` alone cannot prove that a running desktop has adopted the login; Meter also saves that file after the engine confirms the change, so future launches use the selected account.
+
+The bridge opts into the experimental `chatgptAuthTokens` login API, handles host-owned token renewal, and uses native ChatGPT HTTP streaming to avoid sockets retaining the outgoing login. Native OpenAI chat starts, resumes, and forks use that transport. This is an experimental integration with desktop internals; a future desktop release may require an update. A desktop update that removes the cached engine is handled by rediscovering the installed engine. Updating Meter's bridge while it is in use needs one normal Codex quit/reopen.
+
+Finish or stop active work and voice before switching; Meter refuses busy connections. Failed confirmation attempts restore the engine's preceding login. Existing CLI/editor sessions are not restarted. Chats, workspace files, and recorded usage remain in place. File-based ChatGPT credentials are required; keyring-only and API-key logins are not supported. Revoked logins can be replaced through **Add another account**. Removing a saved login retains recorded usage.
 
 ### Usage Guard and AI connection
 
@@ -53,7 +57,7 @@ The AI can call `get_usage_guard`. At **5% or less** five-hour remaining, the re
 
 The API never treats missing, stale, unverified, or already-reset usage as fresh available quota. Hooks deliver one checkpoint per chat/turn/reset and avoid recursive Stop continuations. Hooks run at tool/turn boundaries and cannot interrupt an already-running command. Meter supplies the prompt; the host AI schedules continuation using its supported scheduling tool. Closing Meter makes the local connection unavailable. Local Codex/Work sessions support this path; hosted ChatGPT sessions need a separately reachable connector and do not automatically gain access to loopback services.
 
-This design follows [OpenAI authentication](https://learn.chatgpt.com/docs/auth), [MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli), and [hook contracts](https://learn.chatgpt.com/docs/hooks). Desktop discovery/normal-close behavior was checked against the open-source [Codex Swap Account](https://github.com/ZOONGG/codex-swap-account) and [Codex Account Switcher](https://github.com/liuzhao1225/codex-account-switcher); implementation here is original.
+This design follows [OpenAI authentication](https://learn.chatgpt.com/docs/auth), [MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli), and [hook contracts](https://learn.chatgpt.com/docs/hooks). Live switching follows the app-server authentication contract and the [published desktop bridge approach](https://www.reddit.com/r/codex/comments/1waunnw/i_got_account_switching_working_in_codex_desktop/); implementation here is original. Ordinary file-swap tools require a desktop restart, as documented by [codex-auth](https://github.com/Loongphy/codex-auth).
 
 Newer local session headers include ownership IDs, allowing Meter to recover the matching account's history. Older combined records stay unassigned rather than being guessed to belong to the current account. Keychain installations exposing only an email use a separate email-based identity; an email alone cannot establish workspace ownership.
 
@@ -93,11 +97,15 @@ Meter's local server listens on `127.0.0.1:32145`:
 
 The [Windows GitHub Actions workflow](https://github.com/greeeeggy/codex-usage-tracker/actions/workflows/windows-build.yml) performs all application compilation on GitHub's Windows runners.
 
-It checks frontend types, runs Rust regression tests for account isolation, migration, pricing, log replay, and limit windows, initializes the real Codex app-server without Command Prompt, and tests the dashboard in Chromium at compact and wide sizes. It then builds both Windows executables and verifies that startup with an older decorated window state still produces one title bar. The downloadable artifact includes both executables and their build manifest.
+It checks frontend types, runs Rust regression tests for account isolation, migration, pricing, log replay, and limit windows, initializes the real Codex app-server without Command Prompt, and tests the dashboard in Chromium at compact and wide sizes. It then builds both Windows executables and verifies that startup with an older decorated window state still produces one title bar. The packaged bridge test reproduces a stale desktop login despite a changed auth file, verifies actual engine activation in both directions without a process restart, and checks busy/voice guards, recovery, private RPC isolation, renewal routing, and unknown-message forwarding using synthetic credentials. This test does not simulate live OpenAI inference or prove the whole desktop UI on a signed-in personal account. The downloadable artifact includes both executables and their build manifest.
 
 The app uses Tauri 2, Rust, SQLite, React, TypeScript, Tailwind CSS, and Zustand.
 
-## Version 0.4.0
+## Version 0.5.0
+
+Replaces the slow close/file-swap/relaunch path with a desktop app-server bridge. Switch results require confirmation from the running engine, including when its cached login differs from `auth.json`. Includes one-time setup, busy-work/voice guards, token renewal, recovery, and packaged Windows protocol tests. The 5% Usage Guard API and continuation prompt remain available.
+
+### Version 0.4.0
 
 Adds **Switch** with encrypted saved accounts, isolated first-time sign-in, normal Codex close/relaunch, verified activation and recovery. Adds **Usage Guard**, a local API, packaged MCP tool, and installable lifecycle hooks for the 5% handoff and reset-plus-two-minute continuation prompt. Windows builds remain on GitHub Actions, including bridge checks against the packaged executable.
 

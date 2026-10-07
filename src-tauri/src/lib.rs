@@ -5,6 +5,7 @@ mod codex_client;
 mod commands;
 mod db;
 mod limit_history;
+pub mod live_switch;
 mod local_server;
 mod pricing;
 mod process_detector;
@@ -215,6 +216,7 @@ pub fn run() {
             account_switch::poll_account_login,
             account_switch::cancel_account_login,
             account_switch::switch_codex_account,
+            live_switch::configure_live_switching,
             agent_bridge::get_usage_guard,
             agent_bridge::get_guard_integration,
             agent_bridge::configure_usage_guard,
