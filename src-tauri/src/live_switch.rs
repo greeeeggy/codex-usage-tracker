@@ -336,29 +336,38 @@ pub async fn apply(id: &str) -> Result<usize, String> {
     }
     Ok(applied)
 }
+fn token_expiry(bytes: &[u8]) -> Option<i64> {
+    let data: Value = serde_json::from_slice(bytes).ok()?;
+    let payload = data["tokens"]["access_token"].as_str()?.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()?;
+    serde_json::from_slice::<Value>(&bytes).ok()?["exp"].as_i64()
+}
+fn validate_renewal(
+    bytes: &[u8],
+    account: Option<&AccountProfile>,
+    expected: &str,
+) -> Result<(), String> {
+    if account.map(|p| p.account_key.as_str()) != Some(expected) {
+        return Err("This saved login could not be renewed. Retry or reconnect it with Add another account.".into());
+    }
+    if vault::profile(bytes)?.account_key != expected {
+        return Err("Refreshed login belongs to a different account".into());
+    }
+    if !token_expiry(bytes).is_some_and(|exp| exp > chrono::Utc::now().timestamp() + 30) {
+        return Err("This saved login has expired. Reconnect it with Add another account.".into());
+    }
+    Ok(())
+}
 pub(crate) async fn refresh_auth(
     bytes: Vec<u8>,
     expected: &str,
     force: bool,
 ) -> Result<Vec<u8>, String> {
-    if !force {
-        let value: Value = serde_json::from_slice(&bytes).map_err(|_| "Invalid saved login")?;
-        let claims = value["tokens"]["access_token"]
-            .as_str()
-            .and_then(|s| s.split('.').nth(1))
-            .and_then(|s| {
-                base64::engine::general_purpose::URL_SAFE_NO_PAD
-                    .decode(s.trim_end_matches('='))
-                    .ok()
-            })
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
-        if claims
-            .as_ref()
-            .and_then(|c| c["exp"].as_i64())
-            .is_some_and(|e| e > chrono::Utc::now().timestamp() + 120)
-        {
-            return Ok(bytes);
-        }
+    if !force && token_expiry(&bytes).is_some_and(|exp| exp > chrono::Utc::now().timestamp() + 120)
+    {
+        return Ok(bytes);
     }
     // Renew the active file through its own home so the official engine can
     // coordinate refresh-token rotation with Meter's monitoring process.
@@ -380,9 +389,7 @@ pub(crate) async fn refresh_auth(
         client.start().await?;
         let fresh =
             fs::read(home.join("auth.json")).map_err(|_| "Could not read refreshed login")?;
-        if vault::profile(&fresh)?.account_key != expected {
-            return Err("Refreshed login belongs to a different account".into());
-        }
+        validate_renewal(&fresh, client.account().as_ref(), expected)?;
         Ok(fresh)
     })
     .await
@@ -958,6 +965,26 @@ async fn input_rx_closed(input: &tokio::task::JoinHandle<()>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unchanged_credentials_do_not_prove_a_login_was_renewed() {
+        let jwt = |expiry| {
+            let claims = json!({"exp":expiry,"https://api.openai.com/auth":{"chatgpt_account_id":"a","chatgpt_user_id":"u"}});
+            format!(
+                "e30.{}.fixture",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(serde_json::to_vec(&claims).unwrap())
+            )
+        };
+        let bytes = |expiry| {
+            serde_json::to_vec(&json!({"tokens":{"id_token":jwt(expiry),"access_token":jwt(expiry),"refresh_token":"fixture","account_id":"a"}})).unwrap()
+        };
+        let fresh = bytes(chrono::Utc::now().timestamp() + 3600);
+        let account = vault::profile(&fresh).unwrap();
+        // account/read reported signed out, although a well-formed file remains.
+        assert!(validate_renewal(&fresh, None, &account.account_key).is_err());
+        assert!(validate_renewal(&bytes(0), Some(&account), &account.account_key).is_err());
+        assert!(validate_renewal(&fresh, Some(&account), &account.account_key).is_ok());
+    }
     #[test]
     fn uses_http_for_existing_openai_chats_and_preserves_other_fields() {
         let mut resume = json!({"id":1,"method":"thread/resume","params":{"threadId":"old-chat","modelProvider":"openai","unknownFutureField":[1,2]}});
