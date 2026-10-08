@@ -43,6 +43,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let app_handle = app.handle().clone();
+            if let Err(error) = live_switch::repair_provider_compatibility() {
+                log::error!("Could not repair live-switch chat compatibility: {error}");
+            }
 
             // Create a dedicated Tokio runtime for all async work.
             // Tauri 2 does not provide an ambient Tokio runtime in setup,

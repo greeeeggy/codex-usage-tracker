@@ -62,6 +62,64 @@ fn configuration() -> Result<Configuration, String> {
     )
     .map_err(|_| "Live-switch setup is damaged; enable it again".into())
 }
+
+const PROVIDER_COMPATIBILITY: &str = "\n\n# Codex Meter: saved chats must remain usable after live switching is disabled.\n[model_providers.meter-live]\nname = \"OpenAI\"\nrequires_openai_auth = true\nsupports_websockets = false\n";
+
+fn compatible_config(text: &str) -> Result<Option<String>, String> {
+    let parse = |text: &str| {
+        toml::from_str::<toml::Value>(text.trim_start_matches('\u{feff}'))
+            .map_err(|_| "Codex config.toml is invalid; live-switch setup was stopped".to_string())
+    };
+    let config = parse(text)?;
+    let provider = parse(PROVIDER_COMPATIBILITY)?;
+    if let Some(existing) = config
+        .get("model_providers")
+        .and_then(|p| p.get("meter-live"))
+    {
+        if existing == &provider["model_providers"]["meter-live"] {
+            return Ok(None);
+        }
+        return Err("An incompatible meter-live provider already exists in Codex config.toml; Meter left it unchanged".into());
+    }
+    // Append instead of reserializing: preserve comments, formatting and every
+    // unrelated setting, including the user's default provider and profiles.
+    let updated = format!("{text}{PROVIDER_COMPATIBILITY}");
+    parse(&updated).map_err(|_| "Cannot safely add the live-switch provider to this config.toml layout; Meter left it unchanged".to_string())?;
+    Ok(Some(updated))
+}
+
+fn ensure_provider_at(home: &Path) -> Result<(), String> {
+    let path = home.join("config.toml");
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(_) => {
+            return Err("Cannot read Codex config.toml; live-switch setup was stopped".into())
+        }
+    };
+    if let Some(updated) = compatible_config(&text)? {
+        // Keep the first original, including for upgrades from the old bridge.
+        let backup = home.join("config.toml.before-meter-live.bak");
+        if path.exists() && !backup.exists() {
+            fs::copy(&path, backup).map_err(|_| "Cannot back up Codex config.toml")?;
+        }
+        if path.exists() && fs::read_to_string(&path).ok().as_deref() != Some(&text) {
+            return Err("Codex settings changed during setup; try again".into());
+        }
+        vault::atomic_write(&path, updated.as_bytes())?;
+    }
+    Ok(())
+}
+
+// Repair older installations even when the user already disabled the bridge.
+// Never remove the alias: saved/cached desktop chats can still refer to it.
+pub(crate) fn repair_provider_compatibility() -> Result<(), String> {
+    if configuration().is_ok() {
+        ensure_provider_at(&vault::codex_home()?)?;
+    }
+    Ok(())
+}
+
 fn find_upstream() -> Result<PathBuf, String> {
     let bin = std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("OpenAI/Codex/bin"));
     if let Some(bin) = &bin {
@@ -145,6 +203,7 @@ pub async fn configure_live_switching(
     tauri::async_runtime::spawn_blocking(move || {
         let root = meter_root()?;
         if enabled {
+            ensure_provider_at(&vault::codex_home()?)?;
             let old = configuration().ok();
             let launcher = root.join("bridge/Codex-Meter-Bridge.exe");
             let upstream = find_upstream()?;
@@ -183,6 +242,7 @@ pub async fn configure_live_switching(
                 &root.join("live-switch.json"),
                 &serde_json::to_vec_pretty(&config).unwrap(),
             )?;
+            ensure_provider_at(&vault::codex_home()?)?;
         }
         Ok::<(), String>(())
     })
@@ -881,6 +941,9 @@ async fn proxy() -> Result<(), String> {
             .map_err(|_| "Cannot start the Codex engine")?;
         std::process::exit(status.code().unwrap_or(1));
     }
+    // CLI overrides alone strand chats when Codex is later opened normally.
+    // Persist the same native-auth provider before any thread can use its ID.
+    ensure_provider_at(&vault::codex_home()?)?;
     // A private provider keeps native ChatGPT authentication and its default
     // backend, while disabling sockets that can retain the outgoing login.
     // New engines reserve the built-in `openai` ID, so do not override it.
@@ -1023,6 +1086,65 @@ async fn input_rx_closed(input: &tokio::task::JoinHandle<()>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn provider_compatibility_preserves_settings_and_survives_normal_launches() {
+        let original = "# Keep this comment\nmodel_provider = \"other\"\nmodel = \"custom-model\"\n[profiles.work]\nmodel_provider = \"other\"\n[model_providers.other]\nname = \"My provider\"\nbase_url = \"https://example.test/v1\"\n";
+        let updated = compatible_config(original).unwrap().unwrap();
+        assert!(updated.starts_with(original));
+        let mut config: toml::Value = toml::from_str(&updated).unwrap();
+        assert_eq!(
+            config["model_providers"]["meter-live"]["requires_openai_auth"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            config["model_providers"]["meter-live"]["supports_websockets"].as_bool(),
+            Some(false)
+        );
+        assert!(config["model_providers"]["meter-live"]
+            .get("base_url")
+            .is_none());
+        config["model_providers"]
+            .as_table_mut()
+            .unwrap()
+            .remove("meter-live");
+        assert_eq!(config, toml::from_str::<toml::Value>(original).unwrap());
+        assert!(compatible_config(&updated).unwrap().is_none());
+    }
+    #[test]
+    fn provider_setup_rejects_invalid_or_conflicting_settings() {
+        assert!(compatible_config("[broken").is_err());
+        assert!(compatible_config("[model_providers.meter-live]\nname = \"Other service\"\nbase_url = \"https://example.test\"\n").is_err());
+        let bom = "\u{feff}# Windows config\nmodel = \"example\"\n";
+        assert!(compatible_config(bom).unwrap().unwrap().starts_with(bom));
+    }
+    #[test]
+    fn provider_repair_backs_up_once_without_touching_auth_or_default_provider() {
+        let home = std::env::temp_dir().join(format!("meter-provider-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&home).unwrap();
+        let original = b"# Original settings\r\nmodel = \"example\"\r\n";
+        fs::write(home.join("config.toml"), original).unwrap();
+        fs::write(home.join("auth.json"), b"fixture credentials").unwrap();
+        ensure_provider_at(&home).unwrap();
+        let repaired = fs::read(home.join("config.toml")).unwrap();
+        ensure_provider_at(&home).unwrap();
+        assert_eq!(fs::read(home.join("config.toml")).unwrap(), repaired);
+        assert_eq!(
+            fs::read(home.join("config.toml.before-meter-live.bak")).unwrap(),
+            original
+        );
+        assert_eq!(
+            fs::read(home.join("auth.json")).unwrap(),
+            b"fixture credentials"
+        );
+        assert!(
+            !toml::from_str::<toml::Value>(&String::from_utf8(repaired).unwrap())
+                .unwrap()
+                .as_table()
+                .unwrap()
+                .contains_key("model_provider")
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
     #[test]
     fn unchanged_credentials_do_not_prove_a_login_was_renewed() {
         let jwt = |expiry| {

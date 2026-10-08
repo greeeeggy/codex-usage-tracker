@@ -76,6 +76,14 @@ jobs:
         run: python tests/windows/check_agent_bridge.py release-download/Codex-Meter.exe
       - name: Check packaged live account switching without restarting the engine
         run: python tests/windows/check_live_switch.py release-download/Codex-Meter.exe
+      - name: Resume live-switch chats with the normal native engine after disabling
+        shell: pwsh
+        run: |
+          $npmDirectory = npm root --global
+          $native = Get-ChildItem (Join-Path $npmDirectory '@openai') -Filter codex.exe -Recurse | Select-Object -First 1
+          if (-not $native) { throw 'Official native Codex executable was not found' }
+          python tests/windows/check_provider_recovery.py release-download/Codex-Meter.exe $native.FullName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
           name: Codex-Meter-Windows

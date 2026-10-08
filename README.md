@@ -45,6 +45,8 @@ Meter identifies users and account/workspaces by a hashed combination of their I
 
 Setup installs a local launcher through the desktop's `CODEX_CLI_PATH` override and retains any previous override for **Disable live switching**. It does not modify the desktop installation or automatically close it. Replacing `auth.json` alone cannot prove that a running desktop has adopted the login; Meter also saves that file after the engine confirms the change, so future launches use the selected account.
 
+Meter also backs up `CODEX_HOME/config.toml` and adds the native-auth `meter-live` provider definition without changing your default provider or other settings. This definition remains after disabling live switching because saved or cached chats can still refer to it. Version 0.5.1 repairs older setups on startup, including setups already disabled, to resolve **Model provider `meter-live` not found**. Retry or reopen an affected chat after the repair.
+
 The bridge opts into the experimental `chatgptAuthTokens` login API, handles host-owned token renewal, and uses native ChatGPT HTTP streaming to avoid sockets retaining the outgoing login. Native OpenAI chat starts, resumes, and forks use that transport. This is an experimental integration with desktop internals; a future desktop release may require an update. A desktop update that removes the cached engine is handled by rediscovering the installed engine. Updating Meter's bridge while it is in use needs one normal Codex quit/reopen.
 
 Sign-in and renewal prefer the installed desktop engine over an older global npm CLI. If OpenAI rejects a saved token before its expiry, Meter attempts one renewal and retains rotated credentials even if desktop activation fails. A revoked refresh grant needs to be reconnected once through **Add another account**.
@@ -103,7 +105,11 @@ It checks frontend types, runs Rust regression tests for account isolation, migr
 
 The app uses Tauri 2, Rust, SQLite, React, TypeScript, Tailwind CSS, and Zustand.
 
-## Version 0.5.0
+## Version 0.5.1
+
+Fixes chats failing to resume after live switching is disabled or Codex starts through its normal launcher. Persists the compatibility provider before the bridge can create a chat, retains it when disabling, and repairs old enabled or disabled installations on startup. Includes a regression check that saves a synthetic chat using the packaged bridge's provider and resumes it with the official native engine after disabling, without credentials or inference.
+
+### Version 0.5.0
 
 Replaces the slow close/file-swap/relaunch path with a desktop app-server bridge. Switch results require confirmation from the running engine, including when its cached login differs from `auth.json`. Includes one-time setup, busy-work/voice guards, token renewal, recovery, and packaged Windows protocol tests. The 5% Usage Guard API and continuation prompt remain available.
 

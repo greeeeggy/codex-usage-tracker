@@ -140,6 +140,7 @@ test('Disconnected desktop explains the one-time setup and prevents a false swit
   await expect(page.getByRole('button', { name: 'Switch to Work' })).toBeDisabled();
   await expect(page.getByText(/Waiting for desktop connection/)).toBeVisible();
   await page.getByRole('button', { name: 'Disable live switching' }).click();
+  await expect(page.getByRole('status')).toContainText('Existing chats remain usable');
   await page.getByRole('button', { name: 'Enable live switching' }).click();
   await expect(page.getByRole('status')).toContainText('Quit and reopen Codex normally once');
 });

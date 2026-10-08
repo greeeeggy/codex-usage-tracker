@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import urllib.error
 import urllib.request
 import uuid
@@ -160,6 +161,10 @@ def run(executable):
             initialized = rpc("initialize", {"clientInfo": {"name": "desktop_fixture", "version": "1"}, "capabilities": {"experimentalApi": False, "optOutNotificationMethods": ["turn/completed", "unknown/notification"]}})
             assert initialized["capabilities"] == {"experimentalApi": True, "optOutNotificationMethods": ["unknown/notification"]}
             assert "model_providers.meter-live.supports_websockets=false" in initialized["arguments"]
+            persisted = tomllib.loads((home / "config.toml").read_text(encoding="utf-8"))
+            assert "model_provider" not in persisted
+            assert persisted["model_providers"]["meter-live"]["requires_openai_auth"] is True
+            assert persisted["model_providers"]["meter-live"]["supports_websockets"] is False
             engine_pid = initialized["enginePid"]
             metadata_path = data / "bridge" / "connections" / f"{process.pid}.json"
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))

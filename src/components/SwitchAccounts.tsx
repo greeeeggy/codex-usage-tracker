@@ -66,7 +66,7 @@ export function SwitchAccounts() {
     <section className="feature-panel" aria-label="Live switching setup">
       <h3>Live switching</h3>
       <p>{!status.live.enabled ? 'Enable the desktop connection, then quit and reopen Codex normally once. After setup, switching needs no restart.' : status.live.connected === 0 ? 'Waiting for desktop connection. Quit Codex normally, including any tray process, and reopen it from Start once. Meter never closes Codex for you.' : status.live.busy ? 'Desktop connected. Finish or stop active work or voice before switching.' : 'Desktop connected. Account switches are confirmed by the running Codex engine.'}</p>
-      <button className="feature-button" disabled={busy || status.loginPending} onClick={() => void run(() => invoke('configure_live_switching', { enabled: !status.live.enabled }), status.live.enabled ? 'Live switching disabled for future Codex launches.' : 'Setup saved. Quit and reopen Codex normally once, then wait for Desktop connected.')}>
+      <button className="feature-button" disabled={busy || status.loginPending} onClick={() => void run(() => invoke('configure_live_switching', { enabled: !status.live.enabled }), status.live.enabled ? 'Live switching disabled for future Codex launches. Existing chats remain usable.' : 'Setup saved. Quit and reopen Codex normally once, then wait for Desktop connected.')}>
         {status.live.enabled ? 'Disable live switching' : 'Enable live switching'}
       </button>
     </section>
