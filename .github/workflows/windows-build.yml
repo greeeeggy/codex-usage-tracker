@@ -82,6 +82,8 @@ jobs:
           $npmDirectory = npm root --global
           $native = Get-ChildItem (Join-Path $npmDirectory '@openai') -Filter codex.exe -Recurse | Select-Object -First 1
           if (-not $native) { throw 'Official native Codex executable was not found' }
+          python tests/windows/check_runtime_update.py release-download/Codex-Meter.exe $native.FullName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python tests/windows/check_provider_recovery.py release-download/Codex-Meter.exe $native.FullName
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4

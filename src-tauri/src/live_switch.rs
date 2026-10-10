@@ -121,43 +121,68 @@ pub(crate) fn repair_provider_compatibility() -> Result<(), String> {
 }
 
 fn find_upstream() -> Result<PathBuf, String> {
-    let bin = std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("OpenAI/Codex/bin"));
-    if let Some(bin) = &bin {
-        let mut system = sysinfo::System::new();
-        system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-        if let Some(path) = system
-            .processes()
-            .values()
-            .filter_map(|p| p.exe())
-            .find(|p| {
-                p.starts_with(bin)
-                    && p.file_name()
-                        .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("codex.exe"))
-            })
-        {
-            return Ok(path.to_path_buf());
-        }
-        let mut candidates: Vec<_> = fs::read_dir(bin)
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .map(|e| e.path().join("codex.exe"))
-            .filter(|p| p.is_file())
-            .collect();
-        candidates.sort_by_key(|p| fs::metadata(p).and_then(|m| m.modified()).ok());
-        if let Some(path) = candidates.pop() {
-            return Ok(path);
-        }
-    }
     crate::codex_client::find_codex_executable()
 }
 fn upstream() -> Result<(PathBuf, Vec<String>), String> {
     let config = configuration()?;
-    if config.upstream.is_file() && config.upstream != config.launcher {
+    let managed = std::env::var_os("LOCALAPPDATA").is_some_and(|root| {
+        let bin = PathBuf::from(root).join("OpenAI/Codex/bin");
+        config.upstream.starts_with(&bin)
+            || bin
+                .canonicalize()
+                .is_ok_and(|bin| config.upstream.starts_with(bin))
+    }) || config
+        .upstream
+        .components()
+        .any(|c| c.as_os_str().to_string_lossy().starts_with("OpenAI.Codex_"));
+    if !managed && config.upstream.is_file() && config.upstream != config.launcher {
         Ok((config.upstream, config.upstream_args))
     } else {
         Ok((find_upstream()?, vec![]))
     }
+}
+
+fn sync_runtime_helpers(exe: &Path, launcher: &Path) -> Result<(), String> {
+    if !exe
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("codex.exe"))
+    {
+        return Ok(());
+    }
+    let source = exe.parent().ok_or("Cannot locate the Codex runtime")?;
+    let target = launcher
+        .parent()
+        .ok_or("Cannot locate the desktop bridge")?;
+    // Code mode resolves helpers beside CODEX_CLI_PATH, which points at us.
+    // Refresh all native companion executables from the same engine on launch.
+    for entry in fs::read_dir(source).map_err(|_| "Cannot read the Codex runtime")? {
+        let entry = entry.map_err(|_| "Cannot read a Codex runtime helper")?;
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if entry.path().is_file()
+            && (name == "rg.exe" || (name.starts_with("codex-") && name.ends_with(".exe")))
+        {
+            let destination = target.join(entry.file_name());
+            if entry.path() == destination {
+                continue;
+            }
+            let bytes = fs::read(entry.path()).map_err(|_| "Cannot read a Codex runtime helper")?;
+            if fs::read(&destination).ok().as_deref() != Some(bytes.as_slice()) {
+                vault::atomic_write(&destination, &bytes).map_err(|_| {
+                    "Quit and reopen Codex normally to refresh the live-switch runtime helpers"
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn repair_runtime_helpers() -> Result<(), String> {
+    if let Ok(config) = configuration() {
+        if config.enabled {
+            sync_runtime_helpers(&upstream()?.0, &config.launcher)?;
+        }
+    }
+    Ok(())
 }
 fn environment(action: &str, value: Option<&str>) -> Result<Option<String>, String> {
     use std::os::windows::process::CommandExt;
@@ -214,6 +239,7 @@ pub async fn configure_live_switching(
                     "Quit Codex normally once before updating the live-switch bridge"
                 })?;
             }
+            sync_runtime_helpers(&upstream, &launcher)?;
             let previous = environment("get", None)?;
             let original = if previous.as_deref() == launcher.to_str() {
                 old.and_then(|c| c.previous_launcher)
@@ -932,8 +958,13 @@ async fn proxy() -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let (exe, upstream_args) = upstream()?;
+    sync_runtime_helpers(
+        &exe,
+        &std::env::current_exe().map_err(|_| "Cannot locate the desktop bridge")?,
+    )?;
     if !args.iter().any(|a| a == "app-server") {
-        let status = Command::new(exe)
+        let status = Command::new(&exe)
+            .env("CODEX_CLI_PATH", &exe)
             .args(upstream_args)
             .args(args)
             .creation_flags(0x08000000)
@@ -947,7 +978,8 @@ async fn proxy() -> Result<(), String> {
     // A private provider keeps native ChatGPT authentication and its default
     // backend, while disabling sockets that can retain the outgoing login.
     // New engines reserve the built-in `openai` ID, so do not override it.
-    let mut child = tokio::process::Command::new(exe)
+    let mut child = tokio::process::Command::new(&exe)
+        .env("CODEX_CLI_PATH", &exe)
         .args(upstream_args)
         .args([
             "-c",
@@ -1086,6 +1118,42 @@ async fn input_rx_closed(input: &tokio::task::JoinHandle<()>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn runtime_helpers_follow_updates_without_replacing_the_bridge_or_engine() {
+        let root = std::env::temp_dir().join(format!("meter-runtime-{}", uuid::Uuid::new_v4()));
+        let old = root.join("old");
+        let new = root.join("new");
+        let bridge = root.join("bridge/Codex-Meter-Bridge.exe");
+        for directory in [old.as_path(), new.as_path(), bridge.parent().unwrap()] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        fs::write(&bridge, b"meter").unwrap();
+        fs::write(old.join("codex.exe"), b"old engine").unwrap();
+        fs::write(new.join("codex.exe"), b"new engine").unwrap();
+        fs::write(old.join("codex-code-mode-host.exe"), b"old helper").unwrap();
+        fs::write(new.join("codex-code-mode-host.exe"), b"new helper").unwrap();
+        fs::write(new.join("codex-future-helper.exe"), b"future helper").unwrap();
+        fs::write(new.join("rg.exe"), b"search helper").unwrap();
+        fs::write(new.join("unrelated.txt"), b"leave alone").unwrap();
+        sync_runtime_helpers(&old.join("codex.exe"), &bridge).unwrap();
+        sync_runtime_helpers(&new.join("codex.exe"), &bridge).unwrap();
+        sync_runtime_helpers(&new.join("codex.exe"), &bridge).unwrap();
+        let target = bridge.parent().unwrap();
+        assert_eq!(
+            fs::read(target.join("codex-code-mode-host.exe")).unwrap(),
+            b"new helper"
+        );
+        assert_eq!(
+            fs::read(target.join("codex-future-helper.exe")).unwrap(),
+            b"future helper"
+        );
+        assert_eq!(fs::read(target.join("rg.exe")).unwrap(), b"search helper");
+        assert_eq!(fs::read(&bridge).unwrap(), b"meter");
+        assert_eq!(fs::read(old.join("codex.exe")).unwrap(), b"old engine");
+        assert!(!target.join("codex.exe").exists());
+        assert!(!target.join("unrelated.txt").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn provider_compatibility_preserves_settings_and_survives_normal_launches() {
         let original = "# Keep this comment\nmodel_provider = \"other\"\nmodel = \"custom-model\"\n[profiles.work]\nmodel_provider = \"other\"\n[model_providers.other]\nname = \"My provider\"\nbase_url = \"https://example.test/v1\"\n";

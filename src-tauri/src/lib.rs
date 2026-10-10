@@ -46,6 +46,12 @@ pub fn run() {
             if let Err(error) = live_switch::repair_provider_compatibility() {
                 log::error!("Could not repair live-switch chat compatibility: {error}");
             }
+            if let Err(error) = live_switch::repair_runtime_helpers() {
+                log::error!("Could not refresh live-switch runtime helpers: {error}");
+            }
+            if let Err(error) = agent_bridge::repair_guard_integration() {
+                log::error!("Could not update automatic quota alerts: {error}");
+            }
 
             // Create a dedicated Tokio runtime for all async work.
             // Tauri 2 does not provide an ambient Tokio runtime in setup,

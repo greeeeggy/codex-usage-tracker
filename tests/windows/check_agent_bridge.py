@@ -1,4 +1,5 @@
 """Exercise the packaged GUI executable's headless MCP/hook modes with fake quotas."""
+import base64
 import json
 import os
 from pathlib import Path
@@ -38,6 +39,7 @@ try:
         result = subprocess.run([exe, "--mcp"], input="\n".join(map(json.dumps, requests))+"\n", text=True, capture_output=True, env=env, timeout=15, check=True)
         responses = list(map(json.loads, result.stdout.splitlines()))
         assert len(responses) == 4, result.stdout
+        assert "Do not call get_usage_guard routinely" in responses[0]["result"]["instructions"]
         assert responses[1]["result"]["tools"][0]["name"] == "get_usage_guard"
         assert json.loads(responses[2]["result"]["content"][0]["text"])["remainingPercent"] == 5
         assert 'schedule this same chat' in json.loads(responses[3]["result"]["content"][0]["text"])["hookSpecificOutput"]["additionalContext"]
@@ -45,13 +47,28 @@ try:
         def hook(payload):
             output = subprocess.run([exe, "--quota-hook"], input=json.dumps(payload), text=True, capture_output=True, env=env, timeout=10, check=True)
             return json.loads(output.stdout)
+        low_guard = dict(guard)
+        guard.update(status="ready", shouldPause=False, prompt=None)
+        for name in ("SessionStart", "UserPromptSubmit", "PreToolUse", "Stop"):
+            assert hook({**event, "hook_event_name": name}) == {}, "Routine hook added model context"
+        guard.update(low_guard)
         assert "11:02:00" in hook(event)["hookSpecificOutput"]["additionalContext"]
         assert hook(event) == {}, "Duplicate checkpoint warning"
+        assert hook({**event, "turn_id": "later-turn"}) == {}, "Quota warning repeated on a later turn"
+        script = "& '" + exe.replace("'", "''") + "' --quota-hook"
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode()
+        output = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+                                input=json.dumps({**event, "session_id": "windows-command"}), text=True,
+                                capture_output=True, env=env, timeout=10, check=True)
+        assert "11:02:00" in json.loads(output.stdout)["hookSpecificOutput"]["additionalContext"], output.stdout
         stop = {"hook_event_name": "Stop", "session_id": "chat-b", "turn_id": "turn-b"}
         assert hook(stop)["decision"] == "block"
         assert hook({**stop, "stop_hook_active": True}) == {}, "Stop hook loop"
+        assert hook({**stop, "turn_id": "later-turn"}) == {}, "Stop hook restarted the next turn"
+        guard["checkpointId"] = "fixture:next-reset"
+        assert "hookSpecificOutput" in hook(event), "New quota cycle was never delivered"
         assert not Path(directory, "auth.json").exists(), "Bridge touched credentials"
-    print("Packaged MCP handshake, usage tool, hook prompt, deduplication and no-credential checks passed")
+    print("Packaged MCP, silent automatic hooks, Windows command input, cross-turn deduplication, reset re-arming and no-credential checks passed")
 finally:
     server.shutdown()
     server.server_close()

@@ -169,6 +169,7 @@ test('Usage Guard shows exact resume time and installs or removes the connection
   await page.setViewportSize({ width: 900, height: 650 });
   await page.goto('/');
   await page.getByRole('navigation').getByRole('button', { name: 'Usage Guard', exact: true }).click();
+  await expect(page.getByText(/The AI does not need to call a usage tool during ordinary work/)).toBeVisible();
   await expect(page.getByText('5.0%', { exact: true })).toBeVisible();
   await expect(page.getByText('Exact time: 2026-10-06T11:02:00+00:00')).toBeVisible();
   await page.getByRole('button', { name: 'Enable Usage Guard' }).click();

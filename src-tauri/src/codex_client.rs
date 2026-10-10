@@ -646,6 +646,19 @@ fn codex_executable_candidates(appdata: Option<&OsStr>, path: Option<&OsStr>) ->
     candidates
 }
 
+pub(crate) fn desktop_executable_candidates(bin: &Path) -> Vec<PathBuf> {
+    let mut candidates: Vec<_> = std::fs::read_dir(bin)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("codex.exe"))
+        .filter(|p| p.is_file())
+        .collect();
+    candidates
+        .sort_by_key(|p| std::cmp::Reverse(std::fs::metadata(p).and_then(|m| m.modified()).ok()));
+    candidates
+}
+
 pub(crate) fn find_codex_executable() -> Result<PathBuf, String> {
     let appdata = std::env::var_os("APPDATA");
     let path = std::env::var_os("PATH");
@@ -655,16 +668,26 @@ pub(crate) fn find_codex_executable() -> Result<PathBuf, String> {
     let mut candidates: Vec<PathBuf> = std::env::var_os("LOCALAPPDATA")
         .into_iter()
         .flat_map(|root| {
-            std::fs::read_dir(PathBuf::from(root).join("OpenAI/Codex/bin"))
-                .into_iter()
-                .flatten()
+            desktop_executable_candidates(&PathBuf::from(root).join("OpenAI/Codex/bin"))
         })
-        .filter_map(Result::ok)
-        .map(|entry| entry.path().join("codex.exe"))
-        .filter(|p| p.is_file())
         .collect();
-    candidates
-        .sort_by_key(|p| std::cmp::Reverse(std::fs::metadata(p).and_then(|m| m.modified()).ok()));
+    // The running desktop's package is authoritative even while an older
+    // extracted engine still exists or has a newer filesystem timestamp.
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    for exe in system.processes().values().filter_map(|p| p.exe()) {
+        if exe
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("ChatGPT.exe"))
+            && exe
+                .components()
+                .any(|c| c.as_os_str().to_string_lossy().starts_with("OpenAI.Codex_"))
+        {
+            if let Some(parent) = exe.parent() {
+                candidates.insert(0, parent.join("resources/codex.exe"));
+            }
+        }
+    }
     candidates.extend(codex_executable_candidates(
         appdata.as_deref(),
         path.as_deref(),
@@ -837,6 +860,29 @@ fn normalize_window(source: &str, raw: &RawWindow) -> UsageWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_discovery_prefers_the_new_runtime_while_the_old_one_still_exists() {
+        let bin = std::env::temp_dir().join(format!("meter-engines-{}", uuid::Uuid::new_v4()));
+        let old = bin.join("old/codex.exe");
+        let new = bin.join("new/codex.exe");
+        for (path, seconds) in [(&old, 1), (&new, 2)] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"engine").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(
+                    std::fs::FileTimes::new().set_modified(
+                        std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
+                    ),
+                )
+                .unwrap();
+        }
+        assert_eq!(desktop_executable_candidates(&bin), vec![new, old]);
+        std::fs::remove_dir_all(bin).unwrap();
+    }
 
     #[test]
     fn discovers_native_npm_binaries_with_spaces_and_ignores_cmd_shims() {

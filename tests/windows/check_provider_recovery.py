@@ -142,6 +142,11 @@ def run(meter, native):
 
         # Reproduce an old installation: disabled state plus missing provider.
         config_path.write_text(original, encoding="utf-8")
+        hooks = {"description": "keep my hooks", "hooks": {"PreToolUse": [{"hooks": [
+            {"type": "command", "command": "other.exe"},
+            {"type": "mcp_tool", "server": "codex-meter", "tool": "quota_checkpoint"}]}]}}
+        hooks_path = home / "hooks.json"
+        hooks_path.write_text(json.dumps(hooks), encoding="utf-8")
         before = user_launcher()
         startup = subprocess.STARTUPINFO()
         startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -151,13 +156,21 @@ def run(meter, native):
             deadline = time.monotonic() + 25
             while time.monotonic() < deadline:
                 assert gui.poll() is None, "Meter exited during startup repair"
-                if "meter-live" in config_path.read_text(encoding="utf-8"):
+                if "meter-live" in config_path.read_text(encoding="utf-8") and "commandWindows" in hooks_path.read_text(encoding="utf-8"):
                     break
                 time.sleep(0.1)
             repaired = assert_compatibility()
             assert json.loads(settings.read_text())["enabled"] is False
             assert user_launcher() == before, "Startup repair re-enabled or changed the launcher"
             assert (home / "config.toml.before-meter-live.bak").read_text(encoding="utf-8") == original
+            migrated = json.loads(hooks_path.read_text(encoding="utf-8"))
+            assert migrated["description"] == "keep my hooks"
+            assert migrated["hooks"]["PreToolUse"][0]["hooks"] == [{"type": "command", "command": "other.exe"}]
+            for event in ("SessionStart", "UserPromptSubmit", "PreToolUse", "Stop"):
+                handler = migrated["hooks"][event][-1]["hooks"][0]
+                assert handler["type"] == "command" and "server" not in handler
+                assert "commandWindows" in handler and "statusMessage" not in handler
+            assert json.loads((home / "hooks.json.before-meter-automatic.bak").read_text()) == hooks
         finally:
             gui.terminate()
             gui.wait(timeout=10)

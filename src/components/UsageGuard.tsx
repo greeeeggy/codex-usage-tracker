@@ -27,13 +27,13 @@ export function UsageGuard() {
   };
   const copy = async (text: string) => { try { await navigator.clipboard.writeText(text); setMessage('Copied.'); } catch { setError('Could not copy. Select the text below to copy it manually.'); } };
   return <div className="feature-page">
-    <section className="feature-intro"><ShieldCheck size={22} /><div><h2>Pause before the allowance runs out</h2><p>At 5% remaining, ask the AI to save its progress and schedule this chat to continue two minutes after the exact reset.</p></div></section>
+    <section className="feature-intro"><ShieldCheck size={22} /><div><h2>Pause before the allowance runs out</h2><p>At 5% remaining, Meter automatically tells the AI to save its progress and schedule this chat to continue two minutes after the exact reset.</p></div></section>
     <section className="feature-panel" aria-label="Live quota guard"><div className="section-heading"><h3>Live guard</h3><span>{guard?.status === 'pause' ? 'Checkpoint needed' : guard?.status === 'ready' ? 'Allowance available' : 'Waiting for fresh usage'}</span></div>
       <div className="guard-readings"><div><span>Five-hour remaining</span><strong>{guard?.remainingPercent !== undefined ? `${guard.remainingPercent.toFixed(1)}%` : '—'}</strong></div><div><span>Pause threshold</span><strong>5%</strong></div><div><span>Resume buffer</span><strong>2 minutes</strong></div></div>
       {guard?.resumeAt && <p>Continue at <b>{new Date(guard.resumeAt).toLocaleString()}</b><br /><small>Exact time: {guard.resumeAt}</small></p>}
       {guard?.reason && <p>{guard.reason}</p>}
     </section>
-    <section className="feature-panel"><h3>Connect Codex to Meter</h3><p>The connection adds a usage tool the AI can call and lifecycle hooks that supply the checkpoint prompt between tool calls and at the end of a turn. Keep Meter running.</p>
+    <section className="feature-panel"><h3>Connect Codex to Meter</h3><p>Meter checks allowance automatically in silent local hooks. At 5% or less, it sends one checkpoint alert per chat and reset cycle. The AI does not need to call a usage tool during ordinary work. Keep Meter running.</p>
       <div className="feature-form"><button className="feature-button primary" disabled={busy} onClick={() => void configure(true)}>{installed ? <Check size={15} /> : <ShieldCheck size={15} />}{installed ? 'Update connection' : 'Enable Usage Guard'}</button>{installed && <button className="feature-button" disabled={busy} onClick={() => void configure(false)}>Remove connection</button>}</div>
       <p className="feature-footnote">After enabling, restart Codex and review/trust the new hooks once. Supported local Codex/Work chats can use this connection. Cloud ChatGPT chats need a separate reachable connector. Continuation is scheduled by the AI using the app’s scheduling tool; if that tool is unavailable, the prompt asks it to report the resume time. Hooks check at tool boundaries, so they cannot interrupt an already-running command.</p>
     </section>
